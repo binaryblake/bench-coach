@@ -1,0 +1,16 @@
+{
+  "name": "ORYA Bobcats Bench Coach",
+  "short_name": "Bobcats Bench",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f0f3ed",
+  "theme_color": "#f0f3ed",
+  "icons": [
+    {
+      "src": "/bobcat-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

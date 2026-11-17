@@ -1,0 +1,357 @@
+:root {
+  font-family: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+  color: #171a2f;
+  background: #f2f3f6;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-optical-sizing: auto;
+  font-weight: 500;
+  --ink: #171a2f;
+  --muted: #777b87;
+  --paper: #ffffff;
+  --line: #d9dbe2;
+  --navy: #171a2f;
+  --navy-soft: #e9eaf0;
+  --gray: #686d79;
+  --gray-soft: #eceef1;
+  --gray-mid: #adb1bb;
+  --ice: #438eab;
+  --ice-soft: #e3f1f6;
+  --amber: #d7a94b;
+  --amber-soft: #f7f0df;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+button, input { font: inherit; }
+button { color: inherit; }
+button:focus-visible, input:focus-visible {
+  outline: 3px solid #76b8ce;
+  outline-offset: 3px;
+}
+
+.app-shell {
+  width: min(1120px, 100% - 48px);
+  margin: 0 auto;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 92px;
+  border-bottom: 1px solid var(--line);
+}
+
+.team-mark { display: flex; align-items: center; gap: 12px; }
+.team-mark img { width: 68px; height: 68px; border-radius: 4px; background: #fff; object-fit: contain; }
+.eyebrow, .section-kicker, .role-label, .role-side, .roster-index, .roster-status,
+.roster-name small, .app-footer, .rotation-note {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  letter-spacing: 0;
+}
+.eyebrow { margin: 0; color: var(--muted); font-size: 10px; font-weight: 700; }
+.team-name { margin: 3px 0 0; font-size: 15px; font-weight: 900; line-height: 1; }
+.game-tag {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: #47504a;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 700;
+}
+.game-tag b { color: var(--ink); font-size: 12px; }
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
+
+.page-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.42fr) minmax(300px, .78fr);
+  gap: 52px;
+  padding: 45px 0 42px;
+}
+
+.bench-panel { min-width: 0; }
+.section-kicker {
+  display: flex;
+  justify-content: space-between;
+  color: #69736c;
+  font-size: 10px;
+  font-weight: 700;
+}
+.shift-number { color: var(--ice); }
+.bench-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 28px 0 25px;
+}
+.bench-heading .eyebrow { margin-bottom: 6px; }
+h1, h2, p { margin-top: 0; }
+h1 {
+  margin-bottom: 0;
+  font-size: clamp(36px, 5vw, 56px);
+  font-weight: 850;
+  letter-spacing: 0;
+  line-height: .96;
+}
+h1 span { color: var(--ice); }
+
+.wake-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 11px;
+  border: 1px solid #cbd4cb;
+  border-radius: 4px;
+  background: transparent;
+  color: #445148;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.wake-button:disabled { cursor: not-allowed; opacity: .63; }
+.wake-button.is-awake { border-color: #aeb2bf; background: var(--navy-soft); color: var(--navy); }
+.wake-icon { color: var(--gray); font-size: 13px; }
+.wake-button.is-awake .wake-icon { color: var(--navy); }
+
+.assignments { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.assignment {
+  min-height: 187px;
+  padding: 18px 18px 17px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  animation: rise-in .35s ease both;
+}
+.assignment:nth-child(2) { animation-delay: .06s; }
+.offense-assignment { border-color: #b7d5e0; border-left-width: 4px; background: var(--ice-soft); }
+.defense-assignment { border-color: #d1d3d9; background: var(--gray-soft); }
+.assignment-topline { display: flex; align-items: center; gap: 9px; }
+.role-marker {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--navy);
+  color: #fff;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  font-weight: 700;
+}
+.defense-assignment .role-marker { background: var(--gray); }
+.role-label { font-size: 10px; font-weight: 800; }
+.role-side { margin-left: auto; color: var(--ice); font-size: 9px; }
+.defense-assignment .role-side { color: #666b79; }
+.pair-title {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 27px 0 6px;
+  font-size: clamp(18px, 2.1vw, 25px);
+  font-weight: 800;
+  line-height: 1.1;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.pair-caption { margin: 0; color: #747d76; font-size: 11px; }
+
+.bench-actions {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: center;
+  gap: 18px;
+  margin-top: 18px;
+}
+.next-button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 62px;
+  padding: 0 20px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--ink);
+  color: white;
+  font-size: 16px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background .18s ease, transform .18s ease;
+}
+.next-button:hover { background: #292d43; transform: translateY(-1px); }
+.button-arrow { color: var(--amber); font-size: 24px; font-weight: 500; }
+.previous-button, .reset-button {
+  padding: 8px 0;
+  border: 0;
+  background: transparent;
+  color: #535d56;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.previous-button span { margin-right: 4px; }
+.previous-button:disabled { color: #aab0aa; cursor: default; }
+.reset-button { color: #666b79; }
+.rotation-note { margin: 14px 0 0; color: #737d75; font-size: 10px; }
+.rotation-note span { padding: 0 4px; color: var(--navy); }
+
+.roster-panel { min-width: 0; padding-top: 1px; }
+.roster-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 0 0 15px;
+  border-bottom: 1px solid var(--line);
+}
+.roster-heading .eyebrow { margin-bottom: 6px; }
+h2 { margin-bottom: 0; font-size: 25px; font-weight: 850; line-height: 1; }
+.edit-button {
+  padding: 8px 10px;
+  border: 1px solid #ccd5cc;
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.roster-list { margin: 0; padding: 0; list-style: none; }
+.roster-row {
+  display: grid;
+  grid-template-columns: 29px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 58px;
+  border-bottom: 1px solid var(--line);
+}
+.roster-index { color: #929b93; font-size: 10px; }
+.roster-name { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.roster-name strong { overflow: hidden; font-size: 12px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+.roster-name small { color: #a0a8a0; font-size: 8px; font-weight: 700; }
+.roster-status { min-width: 63px; padding: 5px 6px; border-radius: 3px; text-align: center; font-size: 8px; font-weight: 800; }
+.roster-status.offense { background: var(--ice-soft); color: #285d72; }
+.roster-status.defense { background: var(--gray-soft); color: #4f5460; }
+.roster-status.rest { background: #f0f1f3; color: #777b85; }
+.roster-status.split { background: var(--amber-soft); color: #775c27; }
+.roster-status.pairing-needed { background: #f0f1f3; color: #777b85; }
+.goalie-banner { display: flex; align-items: center; gap: 10px; min-height: 58px; border-bottom: 1px solid var(--line); }
+.goalie-badge { display: grid; width: 25px; height: 25px; place-items: center; border-radius: 3px; background: var(--amber-soft); color: #775c27; font-family: "SFMono-Regular", Consolas, monospace; font-size: 10px; font-weight: 900; }
+.goalie-name { display: flex; flex-direction: column; gap: 3px; }
+.goalie-name strong { font-size: 12px; font-weight: 750; }
+.goalie-name small { color: #8a938c; font-family: "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 700; }
+.roster-footer { display: flex; gap: 15px; padding-top: 14px; }
+.ice-key { display: inline-flex; align-items: center; gap: 5px; color: #717a73; font-size: 9px; }
+.ice-key i { width: 7px; height: 7px; border-radius: 50%; }
+.key-offense { background: var(--navy); }
+.key-defense { background: var(--gray); }
+.key-rest { background: var(--gray-mid); }
+
+.roster-editor { display: grid; gap: 0; padding: 8px 0 0; }
+.player-editor-header, .player-editor-row {
+  display: grid;
+  grid-template-columns: 29px minmax(0, 1fr) 34px;
+  align-items: center;
+  gap: 9px;
+}
+.goalie-name-input { display: grid; grid-template-columns: 65px minmax(0, 1fr); align-items: center; gap: 10px; padding-bottom: 12px; }
+.goalie-name-input span { color: #737d75; font-family: "SFMono-Regular", Consolas, monospace; font-size: 9px; font-weight: 800; }
+.goalie-name-input input {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 9px;
+  border: 1px solid #d5ddd4;
+  border-radius: 3px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 12px;
+}
+.goalie-name-input input::placeholder { color: #a0a8a0; }
+.player-editor-header { padding: 0 0 7px; color: #929b93; font-family: "SFMono-Regular", Consolas, monospace; font-size: 8px; font-weight: 800; }
+.player-editor-header span:last-child { text-align: center; }
+.player-editor-list { margin: 0; padding: 0; list-style: none; }
+.player-editor-row { min-height: 48px; border-bottom: 1px solid var(--line); }
+.player-name-input input {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 9px;
+  border: 1px solid #d5ddd4;
+  border-radius: 3px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 12px;
+}
+.player-name-input input::placeholder { color: #a0a8a0; }
+.remove-skater-button { width: 32px; height: 32px; border: 1px solid #d5d7de; border-radius: 3px; background: transparent; color: #666b79; font-size: 19px; line-height: 1; cursor: pointer; }
+.remove-skater-button:disabled { color: #aab0aa; cursor: not-allowed; }
+.add-skater-button { min-height: 38px; margin: 11px 0 4px; border: 1px dashed #a8cbd7; border-radius: 3px; background: var(--ice-soft); color: #285d72; font-size: 11px; font-weight: 750; cursor: pointer; }
+.roster-editor-actions { display: grid; gap: 8px; padding-top: 13px; }
+.shuffle-button { min-height: 44px; border: 0; border-radius: 4px; background: var(--ink); color: white; font-size: 13px; font-weight: 800; cursor: pointer; }
+.shuffle-button:disabled { background: #d7d9df; color: #737782; cursor: not-allowed; }
+.roster-helper { min-height: 14px; margin: 0; color: #737d75; font-size: 10px; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+.app-footer {
+  display: flex;
+  justify-content: space-between;
+  padding: 16px 0 20px;
+  border-top: 1px solid var(--line);
+  color: #88918a;
+  font-size: 9px;
+  font-weight: 700;
+}
+.app-footer i { padding-left: 4px; color: var(--gray); font-style: normal; }
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(7px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 760px) {
+  .app-shell { width: min(100% - 32px, 520px); }
+  .topbar { min-height: 76px; }
+  .team-mark img { width: 56px; height: 56px; }
+  .page-grid { grid-template-columns: 1fr; gap: 39px; padding: 27px 0 30px; }
+  .bench-heading { margin-top: 24px; }
+  .assignment { min-height: 166px; padding: 15px 13px; }
+  .pair-title { margin-top: 23px; font-size: 19px; }
+  .bench-actions { grid-template-columns: 1fr auto; gap: 10px 15px; }
+  .next-button { grid-column: 1 / -1; min-height: 60px; }
+  .previous-button { justify-self: start; }
+  .reset-button { justify-self: end; }
+  .roster-panel { padding-top: 0; }
+  .roster-row { min-height: 60px; }
+  .app-footer { margin-top: 0; }
+}
+
+@media (max-width: 390px) {
+  .app-shell { width: calc(100% - 24px); }
+  .bench-heading { align-items: flex-start; flex-direction: column; }
+  .wake-button { min-height: 36px; }
+  .assignments { gap: 8px; }
+  .assignment { min-height: 158px; padding: 13px 10px; }
+  .role-side { display: none; }
+  .pair-title { font-size: 17px; }
+  .bench-actions { gap: 8px 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}
