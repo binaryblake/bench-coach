@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import oryaLogo from '../orya-logo.png'
 import './App.css'
 
@@ -25,6 +25,27 @@ type GameState = {
   shift: number
 }
 
+type LineupOption = {
+  id: string
+  pairs: Pair[]
+  flexPlayerIds: number[]
+  goalieName: string
+  playerNames?: Record<string, string>
+}
+
+type ScheduledGame = {
+  id: string
+  date: string
+  title: string
+  players: Player[]
+  goalieName: string
+  lineups: LineupOption[]
+  selectedLineupId: string | null
+  playedLineup: LineupOption | null
+  goldenBobcatPlayerName: string | null
+  playedGoldenBobcatPlayerName: string | null
+}
+
 type SavedPair = {
   id?: number
   playerAId?: number | null
@@ -34,12 +55,16 @@ type SavedPair = {
 }
 
 type SavedGame = {
+  game?: SavedGame
   players?: Array<Partial<Player>>
   goalieName?: string
   goalieId?: number | null
   pairs?: SavedPair[]
   flexPlayerIds?: number[]
   shift?: number
+  scheduledGames?: ScheduledGame[]
+  games?: ScheduledGame[]
+  activeGameId?: string | null
 }
 
 type WakeLockSentinel = {
@@ -66,11 +91,24 @@ function createGame(): GameState {
   return { players: createPlayers(), goalieName: '', pairs: [], flexPlayerIds: [], shift: 1 }
 }
 
+function normalizePlayers(value: unknown): Player[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item, index) => {
+    if (!item || typeof item !== 'object') return []
+    const player = item as Partial<Player>
+    return [{
+      id: Number.isInteger(player.id) && player.id! > 0 ? player.id! : index + 1,
+      name: typeof player.name === 'string' ? player.name : '',
+    }]
+  })
+}
+
 function loadGame(): GameState {
   try {
     const saved = window.localStorage.getItem(STORAGE_KEY)
     if (saved) {
-      const parsed = JSON.parse(saved) as SavedGame
+      const savedState = JSON.parse(saved) as SavedGame
+      const parsed = savedState.game ?? savedState
       const shift = Number.isInteger(parsed.shift) && parsed.shift! >= 1 ? parsed.shift! : 1
 
       if (Array.isArray(parsed.players) && typeof parsed.goalieName === 'string') {
@@ -162,6 +200,246 @@ function loadGame(): GameState {
   }
 
   return createGame()
+}
+
+function loadScheduledGames(): ScheduledGame[] {
+  try {
+    const saved = window.localStorage.getItem(STORAGE_KEY)
+    if (!saved) return []
+    const parsed = JSON.parse(saved) as SavedGame
+    const games = parsed.scheduledGames ?? parsed.games
+    if (!Array.isArray(games)) return []
+    const fallbackGame = parsed.game ?? parsed
+    const fallbackPlayers = normalizePlayers(fallbackGame.players)
+    return games.filter((game) =>
+      typeof game.id === 'string'
+      && typeof game.date === 'string'
+      && typeof game.title === 'string'
+      && Array.isArray(game.lineups),
+    ).map((game) => {
+      const selectedLineup = game.lineups.find((lineup) => lineup.id === game.selectedLineupId)
+      const savedNames = Object.keys(game.playedLineup?.playerNames ?? {}).length
+        ? game.playedLineup?.playerNames
+        : selectedLineup?.playerNames
+      const lineupPlayers = savedNames
+        ? Object.entries(savedNames).map(([id, name]) => ({ id: Number(id), name }))
+          .filter((player) => Number.isInteger(player.id) && typeof player.name === 'string')
+          .sort((left, right) => left.id - right.id)
+        : []
+      const players = normalizePlayers(game.players)
+      return {
+        ...game,
+        players: players.length ? players : lineupPlayers.length ? lineupPlayers : fallbackPlayers,
+        goalieName: typeof game.goalieName === 'string'
+          ? game.goalieName
+          : selectedLineup?.goalieName ?? game.playedLineup?.goalieName ?? fallbackGame.goalieName ?? '',
+        goldenBobcatPlayerName: typeof game.goldenBobcatPlayerName === 'string'
+          ? game.goldenBobcatPlayerName
+          : typeof game.playedGoldenBobcatPlayerName === 'string'
+            ? game.playedGoldenBobcatPlayerName
+            : null,
+        playedGoldenBobcatPlayerName: typeof game.playedGoldenBobcatPlayerName === 'string'
+          ? game.playedGoldenBobcatPlayerName
+          : typeof game.goldenBobcatPlayerName === 'string'
+            ? game.goldenBobcatPlayerName
+            : null,
+      }
+    })
+  } catch {
+    return []
+  }
+}
+
+function createId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+}
+
+function localDateTimeString(date: Date): string {
+  const two = (part: number) => String(part).padStart(2, '0')
+  return `${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())}T${two(date.getHours())}:${two(date.getMinutes())}`
+}
+
+function parseCalendarDate(value: string, timezone?: string): string {
+  const date = value.trim()
+  const dateOnly = date.match(/^(\d{4})(\d{2})(\d{2})$/)
+  if (dateOnly) return `${dateOnly[1]}-${dateOnly[2]}-${dateOnly[3]}`
+  const dateTime = date.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?(Z)?$/)
+  if (!dateTime) return ''
+
+  if (dateTime[7]) {
+    const utc = new Date(Date.UTC(
+      Number(dateTime[1]), Number(dateTime[2]) - 1, Number(dateTime[3]),
+      Number(dateTime[4]), Number(dateTime[5]), Number(dateTime[6] ?? 0),
+    ))
+    return localDateTimeString(utc)
+  }
+  if (timezone) {
+    try {
+      const desired = Date.UTC(
+        Number(dateTime[1]), Number(dateTime[2]) - 1, Number(dateTime[3]),
+        Number(dateTime[4]), Number(dateTime[5]), Number(dateTime[6] ?? 0),
+      )
+      let instant = desired
+      const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hourCycle: 'h23',
+      })
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const parts = Object.fromEntries(formatter.formatToParts(new Date(instant)).map((part) => [part.type, Number(part.value)]))
+        const represented = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second)
+        instant += desired - represented
+      }
+      return localDateTimeString(new Date(instant))
+    } catch {
+      // Fall back to the calendar's floating local time for an unknown TZID.
+    }
+  }
+  return `${dateTime[1]}-${dateTime[2]}-${dateTime[3]}T${dateTime[4]}:${dateTime[5]}`
+}
+
+function unescapeCalendarText(value: string): string {
+  return value.replace(/\\[nN]/g, ' ').replace(/\\([,;\\])/g, '$1').trim()
+}
+
+function formatGameDate(value: string): string {
+  const date = new Date(value.length === 10 ? `${value}T12:00:00` : value)
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: value.length > 10 ? 'short' : undefined }).format(date)
+}
+
+function parseCalendarEvents(contents: string): Array<{ date: string; title: string }> {
+  const unfolded = contents.replace(/\r?\n[ \t]/g, '')
+  const events: Array<{ date: string; title: string }> = []
+  let event: { date?: string; title?: string } | null = null
+
+  for (const line of unfolded.split(/\r?\n/)) {
+    if (line === 'BEGIN:VEVENT') {
+      event = {}
+    } else if (line === 'END:VEVENT' && event) {
+      if (event.date) events.push({ date: event.date, title: event.title || 'Game' })
+      event = null
+    } else if (event) {
+      const property = line.match(/^(DTSTART(?:;[^:]*)?):(.*)$/i)
+      if (property) {
+        const timezone = property[1].match(/(?:^|;)TZID=([^;:]*)/i)?.[1].replace(/^"|"$/g, '')
+        event.date = parseCalendarDate(property[2], timezone)
+      }
+      const summary = line.match(/^SUMMARY(?:;[^:]*)?:(.*)$/i)
+      if (summary) event.title = unescapeCalendarText(summary[1])
+    }
+  }
+
+  return events
+}
+
+function isPracticeTitle(title: string): boolean {
+  return /\bpracti[cs]e?s?\b|\bskills?\b|\bpre[\s-]?season\s+ice\b/i.test(title)
+}
+
+function pairKey(firstName: string, secondName: string): string {
+  return JSON.stringify([firstName.trim().toLowerCase(), secondName.trim().toLowerCase()].sort())
+}
+
+function addKnownName(names: Map<string, string>, value: string | null | undefined): void {
+  const name = value?.trim()
+  if (!name) return
+  const key = name.toLowerCase()
+  if (!names.has(key)) names.set(key, name)
+}
+
+type PairHistoryCount = {
+  count: number
+  names: [string, string]
+}
+
+function countPastPairs(games: ScheduledGame[]): Map<string, PairHistoryCount> {
+  const counts = new Map<string, PairHistoryCount>()
+  for (const game of games) {
+    if (isPracticeTitle(game.title)) continue
+    const lineup = game.playedLineup
+    for (const pair of lineup?.pairs ?? []) {
+      const firstName = lineup?.playerNames?.[String(pair.playerAId)]
+        ?? game.players.find((player) => player.id === pair.playerAId)?.name
+        ?? ''
+      const secondName = lineup?.playerNames?.[String(pair.playerBId)]
+        ?? game.players.find((player) => player.id === pair.playerBId)?.name
+        ?? ''
+      if (!firstName.trim() || !secondName.trim()) continue
+      const names = firstName.toLowerCase() <= secondName.toLowerCase()
+        ? [firstName, secondName] as [string, string]
+        : [secondName, firstName] as [string, string]
+      const key = pairKey(firstName, secondName)
+      const stats = counts.get(key)
+      counts.set(key, { count: (stats?.count ?? 0) + 1, names: stats?.names ?? names })
+    }
+  }
+  return counts
+}
+
+function lineupPairSummary(lineup: LineupOption, players: Player[]): string {
+  const playerName = (playerId: number) =>
+    lineup.playerNames?.[String(playerId)]
+    || players.find((player) => player.id === playerId)?.name
+    || `Player ${playerId}`
+  return lineup.pairs.map((pair) => `${playerName(pair.playerAId)}/${playerName(pair.playerBId)}`).join(' · ')
+}
+
+function sameLineupDetails(left: LineupOption, right: LineupOption): boolean {
+  const leftNames = Object.entries(left.playerNames ?? {}).sort(([first], [second]) => first.localeCompare(second))
+  const rightNames = Object.entries(right.playerNames ?? {}).sort(([first], [second]) => first.localeCompare(second))
+  return left.goalieName === right.goalieName
+    && JSON.stringify(left.pairs) === JSON.stringify(right.pairs)
+    && JSON.stringify(left.flexPlayerIds) === JSON.stringify(right.flexPlayerIds)
+    && JSON.stringify(leftNames) === JSON.stringify(rightNames)
+}
+
+function needsGameRerecord(scheduledGame: ScheduledGame): boolean {
+  if (!scheduledGame.playedLineup && !scheduledGame.playedGoldenBobcatPlayerName) return false
+  const selectedLineup = scheduledGame.lineups.find((lineup) => lineup.id === scheduledGame.selectedLineupId)
+  const lineupChanged = scheduledGame.playedLineup
+    ? !selectedLineup || !sameLineupDetails(selectedLineup, scheduledGame.playedLineup)
+    : Boolean(selectedLineup)
+  return lineupChanged || scheduledGame.goldenBobcatPlayerName !== scheduledGame.playedGoldenBobcatPlayerName
+}
+
+function createBalancedPairing(players: Player[], history: Map<string, number>): { pairs: Pair[]; flexPlayerIds: number[] } {
+  let best: Player[] = [...players]
+  let bestScore = Number.POSITIVE_INFINITY
+  const attempts = Math.min(500, Math.max(100, players.length * players.length * 5))
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const shuffled = [...players]
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+      const swapIndex = Math.floor(Math.random() * (index + 1))
+      ;[shuffled[index], shuffled[swapIndex]] = [shuffled[swapIndex], shuffled[index]]
+    }
+    let score = 0
+    for (let index = 0; index + 1 < shuffled.length; index += 2) {
+      const count = history.get(pairKey(shuffled[index].name, shuffled[index + 1].name)) ?? 0
+      score += (count + 1) ** 2
+    }
+    score += Math.random() * 0.001
+    if (score < bestScore) {
+      best = shuffled
+      bestScore = score
+    }
+  }
+
+  return {
+    pairs: Array.from({ length: Math.floor(best.length / 2) }, (_, index) => ({
+      id: index + 1,
+      playerAId: best[index * 2].id,
+      playerBId: best[index * 2 + 1].id,
+    })),
+    flexPlayerIds: best.length % 2 ? [best[best.length - 1].id] : [],
+  }
 }
 
 type ShiftLine = {
@@ -340,18 +618,83 @@ function roleForPair(pair: Pair, assignments: ShiftAssignments | null): string {
 
 function App() {
   const [game, setGame] = useState<GameState>(loadGame)
+  const [scheduledGames, setScheduledGames] = useState<ScheduledGame[]>(loadScheduledGames)
+  const [activeGameId, setActiveGameId] = useState<string | null>(() => {
+    try {
+      const saved = window.localStorage.getItem(STORAGE_KEY)
+      const id = saved ? (JSON.parse(saved) as SavedGame).activeGameId : null
+      return typeof id === 'string' && loadScheduledGames().some((item) => item.id === id) ? id : null
+    } catch {
+      return null
+    }
+  })
+  const [view, setView] = useState<'bench' | 'schedule' | 'analytics'>('bench')
   const [editingRoster, setEditingRoster] = useState(false)
+  const [manualPairingOpen, setManualPairingOpen] = useState(false)
+  const [manualPairingIds, setManualPairingIds] = useState<Record<number, number>>({})
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'error'>('idle')
+  const [calendarMessage, setCalendarMessage] = useState('')
+  const [calendarUrl, setCalendarUrl] = useState('')
+  const [isImportingCalendar, setIsImportingCalendar] = useState(false)
+  const [scheduleTitle, setScheduleTitle] = useState('')
+  const [scheduleMessage, setScheduleMessage] = useState('')
+  const [scheduleDate, setScheduleDate] = useState(() => {
+    const now = new Date()
+    const two = (part: number) => String(part).padStart(2, '0')
+    return `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}T${two(now.getHours())}:${two(now.getMinutes())}`
+  })
   const [wakeEnabled, setWakeEnabled] = useState(false)
   const [wakeRetry, setWakeRetry] = useState(0)
   const [wakeStatus, setWakeStatus] = useState<WakeStatus>('off')
 
   useEffect(() => {
     try {
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(game))
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ game, scheduledGames, activeGameId }))
     } catch {
       // Local-file origins may not allow browser storage.
     }
-  }, [game])
+  }, [game, scheduledGames, activeGameId])
+
+  useEffect(() => {
+    if (!activeGameId) return
+    setScheduledGames((currentGames) => currentGames.map((scheduledGame) => {
+      if (scheduledGame.id !== activeGameId) return scheduledGame
+      const players = game.players.map((player) => ({ ...player }))
+      const rosterChanged = JSON.stringify(scheduledGame.players) !== JSON.stringify(players)
+        || scheduledGame.goalieName !== game.goalieName
+      if (!scheduledGame.selectedLineupId && !game.pairs.length) {
+        return rosterChanged ? { ...scheduledGame, players, goalieName: game.goalieName } : scheduledGame
+      }
+      const selectedId = scheduledGame.selectedLineupId ?? createId('lineup')
+      const currentLineup: LineupOption = {
+        id: selectedId,
+        pairs: game.pairs.map((pair) => ({ ...pair })),
+        flexPlayerIds: [...game.flexPlayerIds],
+        goalieName: game.goalieName,
+        playerNames: Object.fromEntries(game.players.map((player) => [String(player.id), player.name])),
+      }
+      const existing = scheduledGame.lineups.some((lineup) => lineup.id === selectedId)
+      const lineups = existing
+        ? scheduledGame.lineups.map((lineup) => lineup.id === selectedId ? currentLineup : lineup)
+        : [...scheduledGame.lineups, currentLineup]
+      if (scheduledGame.selectedLineupId === selectedId
+        && !rosterChanged
+        && JSON.stringify(scheduledGame.lineups) === JSON.stringify(lineups)) return scheduledGame
+      return {
+        ...scheduledGame,
+        players,
+        goalieName: game.goalieName,
+        lineups,
+        selectedLineupId: selectedId,
+      }
+    }))
+  }, [game, activeGameId])
+
+  useEffect(() => {
+    if (activeGameId && scheduledGames.some((item) => item.id === activeGameId && isPracticeTitle(item.title))) {
+      setActiveGameId(null)
+    }
+  }, [activeGameId, scheduledGames])
 
   useEffect(() => {
     if (!wakeEnabled) {
@@ -402,6 +745,70 @@ function App() {
   }, [wakeEnabled, wakeRetry])
 
   const assignments = getShiftAssignments(game, game.shift)
+  const visibleScheduledGames = scheduledGames.filter((item) => !isPracticeTitle(item.title))
+  const activeScheduledGame = visibleScheduledGames.find((item) => item.id === activeGameId) ?? null
+  const activeNeedsRerecord = activeScheduledGame ? needsGameRerecord(activeScheduledGame) : false
+  const playedGames = scheduledGames.filter((item) => item.playedLineup && !isPracticeTitle(item.title))
+  const pairCounts = countPastPairs(scheduledGames)
+  const knownSkaters = new Map<string, string>()
+  const goalieCandidates = new Map<string, string>()
+  const goldenBobcatCandidates = new Map<string, string>()
+  for (const player of game.players) addKnownName(knownSkaters, player.name)
+  addKnownName(goalieCandidates, game.goalieName)
+  for (const scheduledGame of visibleScheduledGames) {
+    for (const player of scheduledGame.players) addKnownName(knownSkaters, player.name)
+    for (const lineup of [...scheduledGame.lineups, ...(scheduledGame.playedLineup ? [scheduledGame.playedLineup] : [])]) {
+      for (const name of Object.values(lineup.playerNames ?? {})) addKnownName(knownSkaters, name)
+      addKnownName(goalieCandidates, lineup.goalieName)
+    }
+    addKnownName(goalieCandidates, scheduledGame.goalieName)
+    addKnownName(goldenBobcatCandidates, scheduledGame.goldenBobcatPlayerName)
+    addKnownName(goldenBobcatCandidates, scheduledGame.playedGoldenBobcatPlayerName)
+  }
+  for (const name of knownSkaters.values()) {
+    addKnownName(goalieCandidates, name)
+    addKnownName(goldenBobcatCandidates, name)
+  }
+  for (const name of goalieCandidates.values()) addKnownName(goldenBobcatCandidates, name)
+
+  const allKnownSkaterNames = [...knownSkaters.values()].sort((first, second) => first.localeCompare(second))
+  const pairStats: { key: string; count: number; label: string }[] = []
+  for (let firstIndex = 0; firstIndex < allKnownSkaterNames.length; firstIndex += 1) {
+    for (let secondIndex = firstIndex + 1; secondIndex < allKnownSkaterNames.length; secondIndex += 1) {
+      const first = allKnownSkaterNames[firstIndex]
+      const second = allKnownSkaterNames[secondIndex]
+      const key = pairKey(first, second)
+      const stats = pairCounts.get(key)
+      pairStats.push({
+        key,
+        count: stats?.count ?? 0,
+        label: stats ? `${stats.names[0]} + ${stats.names[1]}` : `${first} + ${second}`,
+      })
+    }
+  }
+  pairStats.sort((left, right) => right.count - left.count || left.label.localeCompare(right.label))
+
+  const goalieStats = new Map<string, { name: string; count: number; dates: string[] }>()
+  for (const [key, name] of goalieCandidates) goalieStats.set(key, { name, count: 0, dates: [] })
+  for (const scheduledGame of playedGames) {
+    const goalie = scheduledGame.playedLineup?.goalieName.trim()
+    if (!goalie) continue
+    const key = goalie.toLowerCase()
+    const stats = goalieStats.get(key) ?? { name: goalie, count: 0, dates: [] }
+    stats.count += 1
+    stats.dates.push(scheduledGame.date)
+    goalieStats.set(key, stats)
+  }
+  const goldenBobcatStats = new Map<string, { name: string; games: { date: string; title: string }[] }>()
+  for (const [key, name] of goldenBobcatCandidates) goldenBobcatStats.set(key, { name, games: [] })
+  for (const scheduledGame of visibleScheduledGames) {
+    const winner = scheduledGame.playedGoldenBobcatPlayerName?.trim()
+    if (!winner) continue
+    const key = winner.toLowerCase()
+    const stats = goldenBobcatStats.get(key) ?? { name: winner, games: [] }
+    stats.games.push({ date: scheduledGame.date, title: scheduledGame.title })
+    goldenBobcatStats.set(key, stats)
+  }
   const pairedPlayerIds = new Set(game.pairs.flatMap((pair) => [pair.playerAId, pair.playerBId]))
   const allNamesEntered = game.players.length >= PLAYERS_PER_SHIFT
     && game.players.every((player) => player.name.trim().length > 0)
@@ -411,6 +818,21 @@ function App() {
     .filter(Boolean)
   const hasDuplicateNames = new Set(enteredNames).size !== enteredNames.length
   const canShuffle = allNamesEntered && !hasDuplicateNames
+  const manualPairCount = Math.floor(game.players.length / 2)
+  const manualPairAssignments = new Map<number, number>()
+  for (const player of game.players) {
+    const pairGroup = manualPairingIds[player.id]
+    if (pairGroup !== undefined) manualPairAssignments.set(pairGroup, (manualPairAssignments.get(pairGroup) ?? 0) + 1)
+  }
+  const manualPairingValid = game.players.length >= PLAYERS_PER_SHIFT
+    && Array.from({ length: manualPairCount }, (_, index) => manualPairAssignments.get(index + 1) === 2).every(Boolean)
+    && (manualPairAssignments.get(0) ?? 0) === (game.players.length % 2)
+  const skaterNames = game.players.map((player) => player.name.trim().toLowerCase()).filter(Boolean)
+  const hasDuplicateSkaterNames = new Set(skaterNames).size !== skaterNames.length
+  const canSaveManualPairing = game.players.length >= PLAYERS_PER_SHIFT
+    && game.players.every((player) => player.name.trim())
+    && !hasDuplicateSkaterNames
+    && manualPairingValid
 
   function updatePlayer(playerId: number, value: string) {
     setGame((current) => ({
@@ -456,6 +878,49 @@ function App() {
     })
   }
 
+  function storeLineup(pairs: Pair[], flexPlayerIds: number[], replaceSelected = false) {
+    setManualPairingOpen(false)
+    if (!activeGameId) {
+      setGame((current) => ({ ...current, pairs, flexPlayerIds, shift: 1 }))
+      setEditingRoster(false)
+      return
+    }
+
+    const lineup: LineupOption = {
+      id: createId('lineup'),
+      pairs,
+      flexPlayerIds,
+      goalieName: game.goalieName,
+      playerNames: Object.fromEntries(game.players.map((player) => [String(player.id), player.name])),
+    }
+    const activeGame = scheduledGames.find((scheduledGame) => scheduledGame.id === activeGameId)
+    if (replaceSelected && activeGame?.selectedLineupId) {
+      lineup.id = activeGame.selectedLineupId
+      setScheduledGames((currentGames) => currentGames.map((scheduledGame) => {
+        if (scheduledGame.id !== activeGameId) return scheduledGame
+        const lineups = scheduledGame.lineups.some((option) => option.id === lineup.id)
+          ? scheduledGame.lineups.map((option) => option.id === lineup.id ? lineup : option)
+          : [...scheduledGame.lineups, lineup]
+        return { ...scheduledGame, lineups, selectedLineupId: lineup.id }
+      }))
+      setGame((current) => ({ ...current, pairs, flexPlayerIds, shift: 1 }))
+      setEditingRoster(false)
+      return
+    }
+
+    setScheduledGames((currentGames) => currentGames.map((scheduledGame) =>
+      scheduledGame.id === activeGameId
+        ? {
+          ...scheduledGame,
+          lineups: [...scheduledGame.lineups, lineup],
+          selectedLineupId: lineup.id,
+        }
+        : scheduledGame,
+    ))
+    setGame((current) => ({ ...current, pairs, flexPlayerIds, shift: 1 }))
+    setEditingRoster(false)
+  }
+
   function shufflePairs() {
     if (!canShuffle) return
 
@@ -474,14 +939,338 @@ function App() {
     }))
     const flexPlayerIds = shuffled.length % 2 ? [shuffled[shuffled.length - 1].id] : []
 
-    setGame((current) => ({ ...current, pairs, flexPlayerIds, shift: 1 }))
+    storeLineup(pairs, flexPlayerIds)
+  }
+
+  function beginManualPairing() {
+    const groups: Record<number, number> = {}
+    const counts = Array.from({ length: manualPairCount }, () => 0)
+    const playerIds = new Set(game.players.map((player) => player.id))
+
+    game.pairs.slice(0, manualPairCount).forEach((pair, index) => {
+      for (const playerId of [pair.playerAId, pair.playerBId]) {
+        if (playerIds.has(playerId) && counts[index] < 2 && groups[playerId] === undefined) {
+          groups[playerId] = index + 1
+          counts[index] += 1
+        }
+      }
+    })
+    for (const playerId of game.flexPlayerIds) {
+      if (playerIds.has(playerId) && groups[playerId] === undefined && game.players.length % 2) {
+        groups[playerId] = 0
+      }
+    }
+    for (const player of game.players) {
+      if (groups[player.id] !== undefined) continue
+      const availableGroup = counts.findIndex((count) => count < 2)
+      if (availableGroup >= 0) {
+        groups[player.id] = availableGroup + 1
+        counts[availableGroup] += 1
+      } else if (game.players.length % 2) {
+        groups[player.id] = 0
+      }
+    }
+
+    setManualPairingIds(groups)
+    setManualPairingOpen(true)
+  }
+
+  function saveManualPairing() {
+    if (!canSaveManualPairing) return
+    const pairs = Array.from({ length: manualPairCount }, (_, index) => {
+      const playerIds = game.players
+        .filter((player) => manualPairingIds[player.id] === index + 1)
+        .map((player) => player.id)
+      return { id: index + 1, playerAId: playerIds[0], playerBId: playerIds[1] }
+    })
+    const flexPlayerIds = game.players
+      .filter((player) => manualPairingIds[player.id] === 0)
+      .map((player) => player.id)
+    storeLineup(pairs, flexPlayerIds, true)
+  }
+
+  function suggestBalancedLineup() {
+    if (!canShuffle) return
+    const history = new Map<string, number>()
+    for (const [key, stats] of countPastPairs(scheduledGames)) history.set(key, stats.count)
+    const suggestion = createBalancedPairing(game.players, history)
+    storeLineup(suggestion.pairs, suggestion.flexPlayerIds)
+  }
+
+  function chooseLineup(scheduledGame: ScheduledGame, lineup: LineupOption) {
+    setActiveGameId(scheduledGame.id)
+    setView('bench')
+    setScheduledGames((currentGames) => currentGames.map((item) =>
+      item.id === scheduledGame.id ? { ...item, selectedLineupId: lineup.id } : item,
+    ))
+    setGame((current) => ({
+      ...current,
+      players: scheduledGame.players.map((player) => ({ ...player })),
+      goalieName: scheduledGame.goalieName || lineup.goalieName,
+      pairs: lineup.pairs.map((pair) => ({ ...pair })),
+      flexPlayerIds: [...lineup.flexPlayerIds],
+      shift: 1,
+    }))
+  }
+
+  function removeLineupOption(scheduledGame: ScheduledGame, lineup: LineupOption) {
+    if (scheduledGame.playedLineup?.id === lineup.id) return
+    const remaining = scheduledGame.lineups.filter((item) => item.id !== lineup.id)
+    const wasSelected = scheduledGame.selectedLineupId === lineup.id
+    const nextLineup = wasSelected
+      ? remaining.find((item) => item.id === scheduledGame.playedLineup?.id) ?? remaining[0] ?? null
+      : remaining.find((item) => item.id === scheduledGame.selectedLineupId) ?? null
+
+    setScheduledGames((currentGames) => currentGames.map((item) =>
+      item.id === scheduledGame.id
+        ? { ...item, lineups: remaining, selectedLineupId: nextLineup?.id ?? null }
+        : item,
+    ))
+
+    if (wasSelected && activeGameId === scheduledGame.id) {
+      setEditingRoster(false)
+      setManualPairingOpen(false)
+      setGame((current) => ({
+        ...current,
+        players: scheduledGame.players.map((player) => ({ ...player })),
+        goalieName: scheduledGame.goalieName || nextLineup?.goalieName || '',
+        pairs: nextLineup?.pairs.map((pair) => ({ ...pair })) ?? [],
+        flexPlayerIds: nextLineup ? [...nextLineup.flexPlayerIds] : [],
+        shift: 1,
+      }))
+    }
+  }
+
+  function openScheduledGame(scheduledGame: ScheduledGame) {
+    setActiveGameId(scheduledGame.id)
+    setView('bench')
     setEditingRoster(false)
+    setManualPairingOpen(false)
+    const lineup = scheduledGame.lineups.find((item) => item.id === scheduledGame.selectedLineupId)
+    setGame((current) => ({
+      ...current,
+      players: scheduledGame.players.map((player) => ({ ...player })),
+      goalieName: scheduledGame.goalieName || lineup?.goalieName || '',
+      pairs: lineup?.pairs.map((pair) => ({ ...pair })) ?? [],
+      flexPlayerIds: lineup ? [...lineup.flexPlayerIds] : [],
+      shift: 1,
+    }))
+  }
+
+  function getLastGameRoster(): { players: Player[]; goalieName: string } {
+    const previousGame = scheduledGames.find((item) => item.id === activeGameId && !isPracticeTitle(item.title))
+      ?? visibleScheduledGames[visibleScheduledGames.length - 1]
+    if (!previousGame) {
+      return {
+        players: game.players.map((player) => ({ ...player })),
+        goalieName: game.goalieName,
+      }
+    }
+    const selectedLineup = previousGame.lineups.find((item) => item.id === previousGame.selectedLineupId)
+    return {
+      players: previousGame.players.map((player) => ({ ...player })),
+      goalieName: previousGame.goalieName || selectedLineup?.goalieName || previousGame.playedLineup?.goalieName || '',
+    }
+  }
+
+  function addScheduledGame(date: string, title: string) {
+    const roster = getLastGameRoster()
+    const newGame: ScheduledGame = {
+      id: createId('game'),
+      date,
+      title: title.trim() || 'Game',
+      players: roster.players,
+      goalieName: roster.goalieName,
+      lineups: [],
+      selectedLineupId: null,
+      playedLineup: null,
+      goldenBobcatPlayerName: null,
+      playedGoldenBobcatPlayerName: null,
+    }
+    setScheduledGames((currentGames) => [...currentGames, newGame].sort((a, b) => a.date.localeCompare(b.date)))
+    setActiveGameId(newGame.id)
+    setGame((current) => ({
+      ...current,
+      players: roster.players.map((player) => ({ ...player })),
+      goalieName: roster.goalieName,
+      pairs: [],
+      flexPlayerIds: [],
+      shift: 1,
+    }))
+    setView('bench')
+  }
+
+  function addManualGame(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!scheduleDate || !scheduleTitle.trim()) return
+    if (isPracticeTitle(scheduleTitle)) {
+      setScheduleMessage('Practice, skills, and pre-season ice events are filtered out. Enter a game name instead.')
+      return
+    }
+    setScheduleMessage('')
+    addScheduledGame(scheduleDate, scheduleTitle)
+    setScheduleTitle('')
+  }
+
+  function addCalendarEvents(contents: string) {
+    if (contents.length > 5 * 1024 * 1024) {
+      setCalendarMessage('That calendar is too large to import (5 MB maximum).')
+      return
+    }
+    const events = parseCalendarEvents(contents)
+    const practiceCount = events.filter((event) => isPracticeTitle(event.title)).length
+    const gameEvents = events.filter((event) => !isPracticeTitle(event.title))
+    if (!gameEvents.length) {
+      setCalendarMessage(practiceCount
+        ? `Skipped ${practiceCount} practice event${practiceCount === 1 ? '' : 's'}; no games to import.`
+        : 'No games with a start date were found in that calendar.')
+      return
+    }
+    const roster = getLastGameRoster()
+    const imported = gameEvents.map((event) => ({
+      id: createId('game'),
+      date: event.date,
+      title: event.title,
+      players: roster.players.map((player) => ({ ...player })),
+      goalieName: roster.goalieName,
+      lineups: [],
+      selectedLineupId: null,
+      playedLineup: null,
+      goldenBobcatPlayerName: null,
+      playedGoldenBobcatPlayerName: null,
+    }))
+    setScheduledGames((currentGames) =>
+      [...currentGames, ...imported].sort((a, b) => a.date.localeCompare(b.date)),
+    )
+    setCalendarMessage(
+      `Imported ${imported.length} game${imported.length === 1 ? '' : 's'}.`
+      + (practiceCount ? ` Skipped ${practiceCount} practice event${practiceCount === 1 ? '' : 's'}.` : ''),
+    )
+  }
+
+  async function importCalendar(file: File | undefined) {
+    if (!file) return
+    setIsImportingCalendar(true)
+    try {
+      addCalendarEvents(await file.text())
+    } catch {
+      setCalendarMessage('Could not read that calendar file.')
+    } finally {
+      setIsImportingCalendar(false)
+    }
+  }
+
+  async function importCalendarUrl(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    let url: URL
+    try {
+      url = new URL(calendarUrl.trim())
+    } catch {
+      setCalendarMessage('Enter a valid calendar URL.')
+      return
+    }
+    if (url.protocol === 'webcal:') url.protocol = 'https:'
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+      setCalendarMessage('Use an HTTP(S) calendar URL without embedded credentials.')
+      return
+    }
+
+    setIsImportingCalendar(true)
+    setCalendarMessage('Fetching calendar…')
+    try {
+      const response = await fetch(url.href, { credentials: 'omit' })
+      if (!response.ok) {
+        setCalendarMessage(`Calendar server returned HTTP ${response.status}.`)
+        return
+      }
+      addCalendarEvents(await response.text())
+    } catch {
+      setCalendarMessage('Could not fetch the calendar. Check the URL and whether its host allows browser access (CORS).')
+    } finally {
+      setIsImportingCalendar(false)
+    }
+  }
+
+  function recordActiveGame() {
+    if (!activeGameId) return
+    const activeGame = scheduledGames.find((item) => item.id === activeGameId)
+    if (!activeGame || !game.pairs.length) return
+    const lineup: LineupOption = {
+      id: activeGame.selectedLineupId ?? createId('lineup'),
+      pairs: game.pairs.map((pair) => ({ ...pair })),
+      flexPlayerIds: [...game.flexPlayerIds],
+      goalieName: game.goalieName,
+      playerNames: Object.fromEntries(game.players.map((player) => [String(player.id), player.name])),
+    }
+    setScheduledGames((currentGames) => currentGames.map((item) => {
+      if (item.id !== activeGameId) return item
+      const lineups = item.lineups.some((option) => option.id === lineup.id)
+        ? item.lineups.map((option) => option.id === lineup.id ? lineup : option)
+        : [...item.lineups, lineup]
+      return {
+        ...item,
+        lineups,
+        selectedLineupId: lineup.id,
+        playedLineup: lineup,
+        playedGoldenBobcatPlayerName: item.goldenBobcatPlayerName,
+      }
+    }))
+    setEditingRoster(false)
+    setManualPairingOpen(false)
+  }
+
+  function updateGoldenBobcatSelection(playerName: string) {
+    if (!activeGameId) return
+    setScheduledGames((currentGames) => currentGames.map((scheduledGame) =>
+      scheduledGame.id === activeGameId
+        ? { ...scheduledGame, goldenBobcatPlayerName: playerName || null }
+        : scheduledGame,
+    ))
   }
 
   function resetGame() {
     if (window.confirm('Reset the game to shift 1? Your roster and pairs will stay saved.')) {
       setGame((current) => ({ ...current, shift: 1 }))
     }
+  }
+
+  async function copyLineup() {
+    const playerName = (playerId: number) => {
+      const player = game.players.find((item) => item.id === playerId)
+      return player?.name.trim() || `Player ${playerId}`
+    }
+    const lines = [
+      `G: ${game.goalieName.trim() || 'Goalie not set'}`,
+      ...game.pairs.map((pair) =>
+        `${playerName(pair.playerAId)}/${playerName(pair.playerBId)}`,
+      ),
+      ...game.players
+        .filter((player) => !pairedPlayerIds.has(player.id))
+        .map((player) => playerName(player.id)),
+    ]
+    const text = lines.join('\n')
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.setAttribute('readonly', '')
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        document.body.appendChild(textarea)
+        textarea.select()
+        const copied = document.execCommand('copy')
+        document.body.removeChild(textarea)
+        if (!copied) throw new Error('Copy command failed')
+      }
+      setCopyStatus('copied')
+    } catch {
+      setCopyStatus('error')
+    }
+
+    window.setTimeout(() => setCopyStatus('idle'), 1800)
   }
 
   function toggleWakeLock() {
@@ -514,10 +1303,24 @@ function App() {
         <div className="game-tag"><span className="live-dot" /> HALF ICE <b>4v4</b></div>
       </header>
 
-      <div className="page-grid">
+      <nav className="view-tabs" aria-label="Main navigation">
+        {(['bench', 'schedule', 'analytics'] as const).map((tab) => (
+          <button
+            className={view === tab ? 'view-tab is-active' : 'view-tab'}
+            type="button"
+            key={tab}
+            onClick={() => setView(tab)}
+            aria-current={view === tab ? 'page' : undefined}
+          >
+            {tab === 'bench' ? 'Bench' : tab === 'schedule' ? 'Schedule' : 'Analytics'}
+          </button>
+        ))}
+      </nav>
+
+      {view === 'bench' ? <div className="page-grid">
         <section className="bench-panel" aria-labelledby="bench-title">
           <div className="section-kicker">
-            <span>BENCH BOARD</span>
+            <span>{activeScheduledGame?.title || 'BENCH BOARD'}</span>
             <span className="shift-number">SHIFT {String(game.shift).padStart(2, '0')}</span>
           </div>
           <div className="bench-heading">
@@ -579,6 +1382,114 @@ function App() {
             <button className="reset-button" type="button" onClick={resetGame}>Reset game</button>
           </div>
           <p className="rotation-note">Lines rotate each shift <span>·</span> pairs stay together when possible</p>
+          {activeScheduledGame && (
+            <div className="game-lineup-controls">
+              <p className="eyebrow">{formatGameDate(activeScheduledGame.date)} · THIS GAME'S LINEUPS</p>
+              <div className="lineup-option-list">
+                {activeScheduledGame.lineups.map((lineup, index) => {
+                  const isRecorded = activeScheduledGame.playedLineup?.id === lineup.id
+                  return (
+                    <div className="lineup-option-row" key={lineup.id}>
+                      <button
+                        className={activeScheduledGame.selectedLineupId === lineup.id ? 'lineup-option is-selected' : 'lineup-option'}
+                        type="button"
+                        onClick={() => chooseLineup(activeScheduledGame, lineup)}
+                      >
+                        <strong>
+                          Lineup {index + 1}
+                          {isRecorded && <span className="recorded-badge">RECORDED</span>}
+                        </strong>
+                        <span>{lineupPairSummary(lineup, game.players) || 'No pairs yet'}</span>
+                      </button>
+                      <button
+                        className="remove-lineup-button"
+                        type="button"
+                        onClick={() => removeLineupOption(activeScheduledGame, lineup)}
+                        disabled={isRecorded}
+                        aria-label={`Remove lineup ${index + 1}${isRecorded ? ' (recorded)' : ''}`}
+                        title={isRecorded ? 'The recorded lineup is kept for analytics' : `Remove lineup ${index + 1}`}
+                      >×</button>
+                    </div>
+                  )
+                })}
+              </div>
+              {(activeScheduledGame.playedLineup || activeScheduledGame.playedGoldenBobcatPlayerName) && (
+                <div className="recorded-lineup-summary" aria-label="Recorded game">
+                  <strong>{activeNeedsRerecord ? 'RECORDED VERSION · CHANGES PENDING' : 'RECORDED FOR THIS GAME'}</strong>
+                  {activeScheduledGame.playedLineup && (
+                    <>
+                      <span>{lineupPairSummary(activeScheduledGame.playedLineup, game.players) || 'No pairs recorded'}</span>
+                      <span>Goalie: {activeScheduledGame.playedLineup.goalieName || 'Not set'}</span>
+                    </>
+                  )}
+                  <span>
+                    {activeNeedsRerecord
+                      ? 'Re-record this game to update the lineup and Golden Bobcat analytics.'
+                      : 'The recorded lineup and Golden Bobcat recipient are included in analytics.'}
+                  </span>
+                  <span>
+                    Golden Bobcat: {activeScheduledGame.playedGoldenBobcatPlayerName || 'No recipient recorded'}
+                  </span>
+                </div>
+              )}
+              <div className="game-lineup-actions">
+                <button className="secondary-button" type="button" onClick={shufflePairs} disabled={!canShuffle}>Shuffle another</button>
+                <button className="secondary-button" type="button" onClick={suggestBalancedLineup} disabled={!canShuffle}>Suggest balanced</button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={recordActiveGame}
+                  disabled={
+                    !game.pairs.length
+                    || (Boolean(activeScheduledGame.playedLineup || activeScheduledGame.playedGoldenBobcatPlayerName)
+                      && !activeNeedsRerecord)
+                  }
+                >
+                  {activeScheduledGame.playedLineup || activeScheduledGame.playedGoldenBobcatPlayerName
+                    ? activeNeedsRerecord ? 'Re-record game' : 'Game recorded'
+                    : game.pairs.length ? 'Record game' : 'Create a lineup first'}
+                </button>
+              </div>
+              <div className="golden-bobcat-control">
+                <label htmlFor="golden-bobcat-recipient">Golden Bobcat recipient</label>
+                <div>
+                  <select
+                    id="golden-bobcat-recipient"
+                    value={activeScheduledGame.goldenBobcatPlayerName ?? ''}
+                    onChange={(event) => updateGoldenBobcatSelection(event.target.value)}
+                  >
+                    <option value="">No recipient selected</option>
+                    {activeScheduledGame.goalieName.trim() && (
+                      <option value={activeScheduledGame.goalieName.trim()}>
+                        {activeScheduledGame.goalieName.trim()} (goalie)
+                      </option>
+                    )}
+                    {activeScheduledGame.goldenBobcatPlayerName
+                      && activeScheduledGame.goldenBobcatPlayerName !== activeScheduledGame.goalieName.trim()
+                      && !game.players.some((player) => player.name.trim() === activeScheduledGame.goldenBobcatPlayerName)
+                      && <option value={activeScheduledGame.goldenBobcatPlayerName}>
+                        Current: {activeScheduledGame.goldenBobcatPlayerName}
+                      </option>}
+                    {game.players.filter((player) => player.name.trim()).map((player) => (
+                      <option key={player.id} value={player.name.trim()}>{player.name.trim()}</option>
+                    ))}
+                  </select>
+                </div>
+                <p className="roster-helper">
+                  {activeScheduledGame.goldenBobcatPlayerName
+                    ? `Selected: ${activeScheduledGame.goldenBobcatPlayerName}. Record or re-record the game to update analytics.`
+                    : 'Select a skater or goalie before recording the game.'}
+                </p>
+              </div>
+              {(activeScheduledGame.playedLineup || activeScheduledGame.playedGoldenBobcatPlayerName) && (
+                <p className="roster-helper">
+                  {activeNeedsRerecord
+                    ? 'Changes are pending; re-record this game to update analytics.'
+                    : 'This game is recorded in analytics.'}
+                </p>
+              )}
+            </div>
+          )}
         </section>
 
         <aside className="roster-panel" aria-labelledby="roster-title">
@@ -587,18 +1498,83 @@ function App() {
               <p className="eyebrow">{game.players.length} SKATERS / 1 GOALIE</p>
               <h2 id="roster-title">Lineup</h2>
             </div>
-            <button
-              className="edit-button"
-              type="button"
-              onClick={() => setEditingRoster((editing) => !editing)}
-              aria-expanded={editingRoster}
-            >
-              {editingRoster ? 'Done' : game.goalieName.trim() ? 'Edit roster' : 'Set roster'}
-            </button>
+            <div className="roster-heading-actions">
+              <button
+                className="copy-button"
+                type="button"
+                onClick={copyLineup}
+                disabled={game.players.length === 0}
+              >
+                {copyStatus === 'copied' ? 'Copied' : copyStatus === 'error' ? 'Copy failed' : 'Copy lineup'}
+              </button>
+              <button
+                className="edit-button"
+                type="button"
+                onClick={() => {
+                  setEditingRoster((editing) => !editing)
+                  setManualPairingOpen(false)
+                }}
+                aria-expanded={editingRoster}
+              >
+                {editingRoster ? 'Done' : game.goalieName.trim() ? 'Edit roster' : 'Set roster'}
+              </button>
+            </div>
           </div>
 
           {editingRoster ? (
             <div className="roster-editor">
+              {manualPairingOpen ? (
+                <section className="manual-pair-editor" aria-labelledby="manual-pair-title">
+                  <div className="manual-pair-heading">
+                    <h3 id="manual-pair-title">Set pairs manually</h3>
+                    <button className="edit-button" type="button" onClick={() => setManualPairingOpen(false)}>Back to roster</button>
+                  </div>
+                  <p className="roster-helper">Choose a pair number for each skater. Each pair needs two skaters.</p>
+                  <ol className="manual-pair-list">
+                    {game.players.map((player) => (
+                      <li className="manual-pair-row" key={player.id}>
+                        <span>{player.name || `Player ${player.id}`}</span>
+                        <label>
+                          <span className="sr-only">Pair for {player.name || `player ${player.id}`}</span>
+                          <select
+                            value={manualPairingIds[player.id] ?? ''}
+                            onChange={(event) => {
+                              const value = event.target.value
+                              setManualPairingIds((current) => {
+                                const next = { ...current }
+                                if (value) next[player.id] = Number(value)
+                                else delete next[player.id]
+                                return next
+                              })
+                            }}
+                          >
+                            <option value="">Select pair</option>
+                            {Array.from({ length: manualPairCount }, (_, index) => (
+                              <option value={index + 1} key={index + 1}>Pair {index + 1}</option>
+                            ))}
+                            {game.players.length % 2 === 1 && <option value={0}>Rotating skater</option>}
+                          </select>
+                        </label>
+                      </li>
+                    ))}
+                  </ol>
+                  <p className="roster-helper" aria-live="polite">
+                    {game.players.length < PLAYERS_PER_SHIFT
+                      ? `At least ${PLAYERS_PER_SHIFT} skaters are needed.`
+                      : !game.players.every((player) => player.name.trim())
+                        ? 'Enter every skater name before saving.'
+                        : hasDuplicateSkaterNames
+                          ? 'Each skater needs a unique name.'
+                          : !manualPairingValid
+                            ? 'Assign exactly two skaters to each pair.'
+                            : `${manualPairCount} pairs ready${game.players.length % 2 ? '; one skater rotates.' : '.'}`}
+                  </p>
+                  <button className="shuffle-button" type="button" onClick={saveManualPairing} disabled={!canSaveManualPairing}>
+                    Save manual pairs
+                  </button>
+                </section>
+              ) : (
+                <>
               <label className="goalie-name-input">
                 <span>GOALIE</span>
                 <input
@@ -638,6 +1614,9 @@ function App() {
                 <button className="shuffle-button" type="button" onClick={shufflePairs} disabled={!canShuffle}>
                   Shuffle pairs
                 </button>
+                <button className="edit-button manual-pair-toggle" type="button" onClick={beginManualPairing}>
+                  Set pairs manually
+                </button>
                 <p className="roster-helper" aria-live="polite">
                   {game.players.length < PLAYERS_PER_SHIFT
                     ? `At least ${PLAYERS_PER_SHIFT} skaters are needed for 4v4.`
@@ -648,6 +1627,8 @@ function App() {
                       : `${game.players.length} skaters ready; ${game.players.length % 2 ? 'one extra rotates through the lines.' : 'all skaters will be paired.'}`}
                 </p>
               </div>
+                </>
+              )}
             </div>
           ) : (
             <>
@@ -698,7 +1679,140 @@ function App() {
             <span className="ice-key"><i className="key-rest" /> Rest</span>
           </div>
         </aside>
-      </div>
+      </div> : view === 'schedule' ? (
+        <main className="content-panel">
+          <div className="content-heading">
+            <div><p className="eyebrow">YOUR SEASON</p><h1>Schedule<span>.</span></h1></div>
+          </div>
+          <div className="schedule-tools">
+            <form className="manual-game-form" onSubmit={addManualGame}>
+              <h2>Add a game</h2>
+              <label>Opponent or game name
+                <input value={scheduleTitle} onChange={(event) => { setScheduleTitle(event.target.value); setScheduleMessage('') }} placeholder="e.g. Bobcats vs Wolves" required />
+              </label>
+              <label>Date and time
+                <input type="datetime-local" value={scheduleDate} onChange={(event) => setScheduleDate(event.target.value)} required />
+              </label>
+              <button className="primary-button" type="submit">Add game</button>
+              <p className="roster-helper" aria-live="polite">{scheduleMessage}</p>
+            </form>
+            <div className="calendar-import">
+              <h2>Import calendar</h2>
+              <p>Import games from an .ics file or calendar URL. Practices, skills, and pre-season ice are skipped; existing games are kept.</p>
+              <form className="calendar-url-form" onSubmit={(event) => void importCalendarUrl(event)}>
+                <label htmlFor="calendar-url">ICS calendar URL</label>
+                <input
+                  id="calendar-url"
+                  type="text"
+                  inputMode="url"
+                  value={calendarUrl}
+                  onChange={(event) => setCalendarUrl(event.target.value)}
+                  placeholder="https://… or webcal://…"
+                  maxLength={2048}
+                  required
+                />
+                <button className="primary-button" type="submit" disabled={isImportingCalendar}>
+                  {isImportingCalendar ? 'Fetching…' : 'Fetch calendar'}
+                </button>
+              </form>
+              <p className="calendar-hint">The calendar host must allow browser access (CORS). webcal URLs use HTTPS.</p>
+              <label className="file-button">Choose .ics file
+                <input
+                  type="file"
+                  accept=".ics,.ical,text/calendar"
+                  disabled={isImportingCalendar}
+                  onChange={(event) => void importCalendar(event.target.files?.[0])}
+                />
+              </label>
+              <p className="roster-helper" aria-live="polite">{calendarMessage}</p>
+            </div>
+          </div>
+          <div className="schedule-list-section">
+            <h2>Games <span>{visibleScheduledGames.length}</span></h2>
+            {visibleScheduledGames.length ? (
+              <ul className="schedule-list">
+                {visibleScheduledGames.map((scheduledGame) => (
+                  <li className="schedule-row" key={scheduledGame.id}>
+                    <div className="schedule-date">{formatGameDate(scheduledGame.date)}</div>
+                    <div className="schedule-description">
+                      <strong>{scheduledGame.title}</strong>
+                      <span>
+                        {scheduledGame.playedLineup
+                          ? `Played · Lineup ${Math.max(1, scheduledGame.lineups.findIndex((lineup) => lineup.id === scheduledGame.playedLineup?.id) + 1)} recorded${needsGameRerecord(scheduledGame) ? ' · update needed' : ''}`
+                          : `${scheduledGame.lineups.length} saved lineup${scheduledGame.lineups.length === 1 ? '' : 's'}`}
+                      </span>
+                    </div>
+                    <button className="edit-button" type="button" onClick={() => openScheduledGame(scheduledGame)}>Open lineup</button>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="empty-message">
+              {scheduledGames.length
+                ? 'No games to show. Practice, skills, and pre-season ice events are filtered out.'
+                : 'No games yet. Add one or import your calendar.'}
+            </p>}
+          </div>
+        </main>
+      ) : (
+        <main className="content-panel">
+          <div className="content-heading">
+            <div><p className="eyebrow">FAIR PLAY OVER TIME</p><h1>Analytics<span>.</span></h1></div>
+          </div>
+          <p className="analytics-note">Statistics use each game's recorded snapshot. Zero-count pairings, goalie appearances, and Golden Bobcat awards are included for players known from saved rosters. Re-record a game to apply lineup or award changes; pair counts are game-level, not shift-level.</p>
+          <section className="analytics-section">
+            <div className="analytics-section-heading"><h2>Skater pairs</h2><span>{playedGames.length} recorded games</span></div>
+            {pairStats.length ? (
+              <ul className="analytics-list">
+                {pairStats.map((pair) => (
+                  <li key={pair.key}>
+                    <strong>{pair.label}</strong>
+                    <span>
+                      {pair.count} {pair.count === 1 ? 'game' : 'games'}
+                      {pair.count ? '' : ' · Not yet'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="empty-message">Record played games to see which skaters have paired up.</p>}
+          </section>
+          <section className="analytics-section">
+            <div className="analytics-section-heading"><h2>Goalie appearances</h2><span>All known players · games and dates</span></div>
+            {goalieStats.size ? (
+              <ul className="analytics-list goalie-analytics">
+                {[...goalieStats].sort((a, b) => b[1].count - a[1].count || a[1].name.localeCompare(b[1].name)).map(([key, stats]) => (
+                  <li key={key}>
+                    <strong>{stats.name}</strong>
+                    <span>
+                      {stats.count} {stats.count === 1 ? 'game' : 'games'}
+                      {stats.dates.length ? ` · ${stats.dates.map(formatGameDate).join(', ')}` : ' · Not yet'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="empty-message">Add players to a roster to see goalie appearances.</p>}
+          </section>
+          <section className="analytics-section">
+            <div className="analytics-section-heading"><h2>Golden Bobcat winners</h2><span>All known players · awards and dates</span></div>
+            {goldenBobcatStats.size ? (
+              <ul className="analytics-list goalie-analytics">
+                {[...goldenBobcatStats].sort((a, b) =>
+                  b[1].games.length - a[1].games.length || a[1].name.localeCompare(b[1].name),
+                ).map(([key, stats]) => (
+                  <li key={key}>
+                    <strong>{stats.name}</strong>
+                    <span>
+                      {stats.games.length} {stats.games.length === 1 ? 'award' : 'awards'}
+                      {stats.games.length
+                        ? ` · ${stats.games.map((gameEntry) => `${formatGameDate(gameEntry.date)} — ${gameEntry.title}`).join(', ')}`
+                        : ' · Not yet'}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : <p className="empty-message">Add players to a roster to see Golden Bobcat history.</p>}
+          </section>
+        </main>
+      )}
       <footer className="app-footer">
         <span>ORYA BOBCATS</span>
         <span>BUILT FOR THE BENCH <i>✳</i></span>
