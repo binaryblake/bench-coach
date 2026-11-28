@@ -334,6 +334,29 @@ h2 { margin-bottom: 0; font-size: 25px; font-weight: 850; line-height: 1; }
 .view-tab.is-active { border-bottom-color: var(--ice); color: var(--ink); }
 .game-lineup-controls { display: grid; gap: 10px; margin-top: 20px; padding: 15px; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
 .game-lineup-controls > .eyebrow { margin-bottom: 0; }
+.game-mode-select { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; color: #616775; font-size: 10px; font-weight: 750; }
+.game-mode-select select { min-height: 36px; padding: 0 9px; border: 1px solid #ccd5cc; border-radius: 3px; background: #fff; color: var(--ink); font-size: 11px; }
+.period-tabs { display: flex; gap: 6px; }
+.period-tab { flex: 1; min-height: 34px; border: 1px solid #ccd5cc; border-radius: 3px; background: #fff; color: var(--muted); font-size: 10px; font-weight: 750; cursor: pointer; }
+.period-tab.is-active { border-color: var(--ice); background: var(--ice-soft); color: #285d72; }
+.period-slot-editor { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.period-position-group { display: grid; align-content: start; gap: 7px; padding: 10px; border: 1px solid var(--line); border-radius: 3px; }
+.period-position-group h3 { margin: 0 0 2px; color: #616775; font-size: 10px; }
+.period-line-group { display: grid; gap: 5px; padding-top: 7px; border-top: 1px solid var(--line); }
+.period-line-group h4 { margin: 0; color: #737782; font-size: 9px; text-transform: uppercase; }
+.period-player-assignment { display: grid; grid-template-columns: minmax(0, 1fr) 92px; align-items: center; gap: 6px; color: var(--ink); font-size: 10px; font-weight: 700; }
+.period-position-group select { min-width: 0; min-height: 32px; padding: 0 6px; border: 1px solid #d5d7de; border-radius: 3px; background: #fff; color: var(--ink); font-size: 10px; }
+.full-ice-assignments { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.full-ice-on-ice-list { display: flex; flex-wrap: wrap; align-content: flex-start; align-items: flex-start; gap: 7px; min-height: 54px; margin: 20px 0 8px; }
+.full-ice-on-ice-player { display: grid; gap: 4px; padding: 6px 8px; border: 1px solid rgba(37, 48, 62, .15); border-radius: 3px; background: rgba(255, 255, 255, .66); }
+.full-ice-on-ice-player strong { color: var(--ink); font-size: clamp(14px, 1.8vw, 20px); line-height: 1.1; }
+.double-shift-badge { width: fit-content; padding: 3px 4px; border-radius: 2px; background: #fff0d6; color: #854d0e; font-size: 8px; font-weight: 850; line-height: 1.2; text-transform: uppercase; }
+.shift-navigation { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 14px; margin-top: 12px; }
+.shift-navigation .next-button { min-height: 46px; padding: 0 14px; font-size: 12px; }
+.shift-navigation .previous-button { min-height: 40px; }
+.period-navigation { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 14px; margin-top: 12px; }
+.period-navigation .next-button { min-height: 46px; padding: 0 14px; font-size: 12px; }
+.period-navigation .previous-button { min-height: 40px; }
 .lineup-option-list { display: grid; gap: 7px; }
 .lineup-option-row { display: grid; grid-template-columns: minmax(0, 1fr) 34px; align-items: stretch; gap: 7px; }
 .lineup-option {
@@ -450,6 +473,8 @@ h2 { margin-bottom: 0; font-size: 25px; font-weight: 850; line-height: 1; }
   .bench-heading { align-items: flex-start; flex-direction: column; }
   .wake-button { min-height: 36px; }
   .assignments { gap: 8px; }
+  .full-ice-assignments { gap: 8px; }
+  .period-slot-editor { grid-template-columns: 1fr; }
   .assignment { min-height: 158px; padding: 13px 10px; }
   .role-side { display: none; }
   .pair-title { font-size: 17px; }

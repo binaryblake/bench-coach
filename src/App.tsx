@@ -5,6 +5,16 @@ import './App.css'
 const STORAGE_KEY = 'orya-bench-coach'
 const DEFAULT_SKATER_COUNT = 10
 const PLAYERS_PER_SHIFT = 4
+const FULL_ICE_PERIOD_COUNT = 3
+const FORWARD_LINE_SIZE = 3
+const DEFENSE_PAIR_SIZE = 2
+
+type GameMode = '4v4' | '5v5'
+
+type PeriodLineup = {
+  forwardPlayerIds: number[]
+  defensePlayerIds: number[]
+}
 
 type Pair = {
   id: number
@@ -44,6 +54,12 @@ type ScheduledGame = {
   playedLineup: LineupOption | null
   goldenBobcatPlayerName: string | null
   playedGoldenBobcatPlayerName: string | null
+  mode: GameMode
+  periodLineups: PeriodLineup[]
+  playedMode: GameMode | null
+  playedPeriodLineups: PeriodLineup[] | null
+  playedPeriodPlayerNames: Record<string, string> | null
+  playedGoalieName: string | null
 }
 
 type SavedPair = {
@@ -89,6 +105,210 @@ function createPlayers(count = DEFAULT_SKATER_COUNT): Player[] {
 
 function createGame(): GameState {
   return { players: createPlayers(), goalieName: '', pairs: [], flexPlayerIds: [], shift: 1 }
+}
+
+function emptyPeriodLineup(): PeriodLineup {
+  return { forwardPlayerIds: [], defensePlayerIds: [] }
+}
+
+function clonePeriodLineups(periods: PeriodLineup[]): PeriodLineup[] {
+  return periods.map((period) => ({
+    forwardPlayerIds: [...period.forwardPlayerIds],
+    defensePlayerIds: [...period.defensePlayerIds],
+  }))
+}
+
+function normalizePeriodLineups(value: unknown, players: Player[]): PeriodLineup[] {
+  if (!Array.isArray(value) || value.length === 0) return []
+  const playerIds = new Set(players.filter((player) => player.name.trim()).map((player) => player.id))
+  const savedPeriods = value as Partial<PeriodLineup>[]
+  return Array.from({ length: FULL_ICE_PERIOD_COUNT }, (_, periodIndex) => {
+    const saved = savedPeriods[periodIndex]
+    const normalizeIds = (slots: unknown) => {
+      if (!Array.isArray(slots)) return []
+      const seen = new Set<number>()
+      return slots.filter((playerId): playerId is number => {
+        if (typeof playerId !== 'number' || !Number.isInteger(playerId) || !playerIds.has(playerId) || seen.has(playerId)) {
+          return false
+        }
+        seen.add(playerId)
+        return true
+      })
+    }
+    const forwardPlayerIds = normalizeIds(saved?.forwardPlayerIds)
+    const forwardIds = new Set(forwardPlayerIds)
+    return {
+      forwardPlayerIds,
+      defensePlayerIds: normalizeIds(saved?.defensePlayerIds).filter((playerId) => !forwardIds.has(playerId)),
+    }
+  })
+}
+
+function generateBalancedPeriodLineups(players: Player[]): PeriodLineup[] {
+  const roster = players.filter((player) => player.name.trim())
+  const defenseAppearances = new Map(roster.map((player) => [player.id, 0]))
+  const rosterOrder = new Map(roster.map((player, index) => [player.id, index]))
+  const pairAppearances = new Map<string, number>()
+  const balancedDefenseCount = roster.length > 1
+    ? Math.max(1, Math.min(roster.length - 1, Math.round(roster.length * 2 / 5)))
+    : 0
+  const balancedForwardCount = roster.length - balancedDefenseCount
+  const defenseCount = balancedDefenseCount === 4 && balancedForwardCount % 2 === 1
+    ? 3
+    : balancedDefenseCount
+
+  return Array.from({ length: FULL_ICE_PERIOD_COUNT }, (_, periodIndex) => {
+    const rotatedOrder = (player: Player) =>
+      ((rosterOrder.get(player.id) ?? 0) + periodIndex) % Math.max(roster.length, 1)
+    const defense = [...roster]
+      .sort((left, right) =>
+        (defenseAppearances.get(left.id) ?? 0) - (defenseAppearances.get(right.id) ?? 0)
+        || rotatedOrder(left) - rotatedOrder(right),
+      )
+      .slice(0, defenseCount)
+      .sort((left, right) => rotatedOrder(left) - rotatedOrder(right))
+    const defenseIds = new Set(defense.map((player) => player.id))
+    const forwardPlayers = roster
+      .filter((player) => !defenseIds.has(player.id))
+      .map((player) => player.id)
+    const orderedForwardIds = orderPlayersIntoBalancedGroups(
+      forwardPlayers,
+      FORWARD_LINE_SIZE,
+      periodIndex,
+      rosterOrder,
+      roster.length,
+      pairAppearances,
+    )
+    const orderedDefenseIds = orderPlayersIntoBalancedGroups(
+      defense.map((player) => player.id),
+      DEFENSE_PAIR_SIZE,
+      periodIndex,
+      rosterOrder,
+      roster.length,
+      pairAppearances,
+    )
+
+    for (const player of defense) defenseAppearances.set(player.id, (defenseAppearances.get(player.id) ?? 0) + 1)
+
+    return {
+      forwardPlayerIds: orderedForwardIds,
+      defensePlayerIds: orderedDefenseIds,
+    }
+  })
+}
+
+function normalizeRecordedPeriodLineups(value: unknown): PeriodLineup[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null
+  const savedPeriods = value as Partial<PeriodLineup>[]
+  return Array.from({ length: FULL_ICE_PERIOD_COUNT }, (_, periodIndex) => {
+    const saved = savedPeriods[periodIndex]
+    const normalizeIds = (slots: unknown) => {
+      if (!Array.isArray(slots)) return []
+      const seen = new Set<number>()
+      return slots.filter((playerId): playerId is number => {
+        if (typeof playerId !== 'number' || !Number.isInteger(playerId) || playerId <= 0 || seen.has(playerId)) {
+          return false
+        }
+        seen.add(playerId)
+        return true
+      })
+    }
+    const forwardPlayerIds = normalizeIds(saved?.forwardPlayerIds)
+    const forwardIds = new Set(forwardPlayerIds)
+    return {
+      forwardPlayerIds,
+      defensePlayerIds: normalizeIds(saved?.defensePlayerIds).filter((playerId) => !forwardIds.has(playerId)),
+    }
+  })
+}
+
+function splitIntoGroups(playerIds: number[], groupSize: number): number[][] {
+  const sizes: number[] = []
+  let remaining = playerIds.length
+  while (remaining > 0) {
+    const nextSize = Math.min(groupSize, remaining)
+    sizes.push(nextSize)
+    remaining -= nextSize
+    if (remaining === 1 && sizes.length > 0) {
+      sizes[sizes.length - 1] += 1
+      remaining = 0
+    }
+  }
+  const groups: number[][] = []
+  let startIndex = 0
+  for (const size of sizes) {
+    groups.push(playerIds.slice(startIndex, startIndex + size))
+    startIndex += size
+  }
+  return groups
+}
+
+function getShiftPlayerIds(playerIds: number[], playersPerShift: number, shiftIndex: number): number[] {
+  if (!playerIds.length) return []
+  const count = Math.min(playersPerShift, playerIds.length)
+  const startIndex = (shiftIndex * playersPerShift) % playerIds.length
+  return Array.from({ length: count }, (_, index) => playerIds[(startIndex + index) % playerIds.length])
+}
+
+function getFullIceShiftLineup(period: PeriodLineup, shiftIndex: number): PeriodLineup {
+  return {
+    forwardPlayerIds: getShiftPlayerIds(period.forwardPlayerIds, FORWARD_LINE_SIZE, shiftIndex),
+    defensePlayerIds: getShiftPlayerIds(period.defensePlayerIds, DEFENSE_PAIR_SIZE, shiftIndex),
+  }
+}
+
+function getDoubleShiftPlayerIds(current: PeriodLineup, next: PeriodLineup): Set<number> {
+  const nextShiftPlayerIds = new Set([...next.forwardPlayerIds, ...next.defensePlayerIds])
+  return new Set(
+    [...current.forwardPlayerIds, ...current.defensePlayerIds]
+      .filter((playerId) => nextShiftPlayerIds.has(playerId)),
+  )
+}
+
+function orderPlayersIntoBalancedGroups(
+  playerIds: number[],
+  groupSize: number,
+  periodIndex: number,
+  rosterOrder: Map<number, number>,
+  rosterLength: number,
+  pairAppearances: Map<string, number>,
+): number[] {
+  const ordered: number[] = []
+  const pairKey = (first: number, second: number) =>
+    first < second ? `${first}:${second}` : `${second}:${first}`
+  const rotationRank = (playerId: number) =>
+    ((rosterOrder.get(playerId) ?? 0) + periodIndex) % Math.max(rosterLength, 1)
+  const partnerCount = (playerId: number) =>
+    [...pairAppearances.entries()]
+      .filter(([key]) => key.split(':').includes(String(playerId)))
+      .reduce((sum, [, count]) => sum + count, 0)
+  const remaining = new Set(playerIds)
+
+  for (const size of splitIntoGroups(playerIds, groupSize).map((group) => group.length)) {
+    const group: number[] = []
+    while (group.length < size) {
+      const candidates = [...remaining].sort((left, right) => {
+        const leftGroupRepeats = group.reduce((sum, id) => sum + (pairAppearances.get(pairKey(left, id)) ?? 0), 0)
+        const rightGroupRepeats = group.reduce((sum, id) => sum + (pairAppearances.get(pairKey(right, id)) ?? 0), 0)
+        return leftGroupRepeats - rightGroupRepeats
+          || partnerCount(left) - partnerCount(right)
+          || rotationRank(left) - rotationRank(right)
+      })
+      const nextPlayer = candidates[0]
+      if (nextPlayer === undefined) break
+      group.push(nextPlayer)
+      remaining.delete(nextPlayer)
+    }
+    for (let firstIndex = 0; firstIndex < group.length; firstIndex += 1) {
+      for (let secondIndex = firstIndex + 1; secondIndex < group.length; secondIndex += 1) {
+        const key = pairKey(group[firstIndex], group[secondIndex])
+        pairAppearances.set(key, (pairAppearances.get(key) ?? 0) + 1)
+      }
+    }
+    ordered.push(...group)
+  }
+
+  return ordered
 }
 
 function normalizePlayers(value: unknown): Player[] {
@@ -227,9 +447,13 @@ function loadScheduledGames(): ScheduledGame[] {
           .sort((left, right) => left.id - right.id)
         : []
       const players = normalizePlayers(game.players)
+      const rosterPlayers = players.length ? players : lineupPlayers.length ? lineupPlayers : fallbackPlayers
+      const savedMode: GameMode = game.mode === '5v5' ? '5v5' : '4v4'
+      const savedPeriods = normalizePeriodLineups(game.periodLineups, rosterPlayers)
+      const savedPlayedPeriods = normalizeRecordedPeriodLineups(game.playedPeriodLineups)
       return {
         ...game,
-        players: players.length ? players : lineupPlayers.length ? lineupPlayers : fallbackPlayers,
+        players: rosterPlayers,
         goalieName: typeof game.goalieName === 'string'
           ? game.goalieName
           : selectedLineup?.goalieName ?? game.playedLineup?.goalieName ?? fallbackGame.goalieName ?? '',
@@ -243,6 +467,18 @@ function loadScheduledGames(): ScheduledGame[] {
           : typeof game.goldenBobcatPlayerName === 'string'
             ? game.goldenBobcatPlayerName
             : null,
+        mode: savedMode,
+        periodLineups: savedMode === '5v5' && !hasCompletePeriodRotation(savedPeriods, rosterPlayers)
+          ? generateBalancedPeriodLineups(rosterPlayers)
+          : savedPeriods,
+        playedMode: game.playedMode === '5v5' || game.playedMode === '4v4'
+          ? game.playedMode
+          : savedPlayedPeriods ? '5v5' : game.playedLineup ? '4v4' : null,
+        playedPeriodLineups: savedPlayedPeriods,
+        playedPeriodPlayerNames: game.playedPeriodPlayerNames ?? null,
+        playedGoalieName: typeof game.playedGoalieName === 'string'
+          ? game.playedGoalieName
+          : game.playedLineup?.goalieName ?? null,
       }
     })
   } catch {
@@ -361,8 +597,45 @@ type PairHistoryCount = {
 
 function countPastPairs(games: ScheduledGame[]): Map<string, PairHistoryCount> {
   const counts = new Map<string, PairHistoryCount>()
+  const addPair = (firstName: string, secondName: string) => {
+    if (!firstName.trim() || !secondName.trim()) return
+    const names = firstName.toLowerCase() <= secondName.toLowerCase()
+      ? [firstName, secondName] as [string, string]
+      : [secondName, firstName] as [string, string]
+    const key = pairKey(firstName, secondName)
+    const stats = counts.get(key)
+    counts.set(key, { count: (stats?.count ?? 0) + 1, names: stats?.names ?? names })
+  }
+
   for (const game of games) {
     if (isPracticeTitle(game.title)) continue
+    if (game.playedMode === '5v5' && game.playedPeriodLineups) {
+      const gamePairs = new Map<string, [string, string]>()
+      for (const period of game.playedPeriodLineups) {
+        const groups = [
+          ...splitIntoGroups(period.forwardPlayerIds, FORWARD_LINE_SIZE),
+          ...splitIntoGroups(period.defensePlayerIds, DEFENSE_PAIR_SIZE),
+        ]
+        for (const group of groups) {
+          const names = group.flatMap((playerId) => {
+            const name = game.playedPeriodPlayerNames?.[String(playerId)]
+              ?? game.players.find((player) => player.id === playerId)?.name
+              ?? ''
+            return name.trim() ? [name] : []
+          })
+          for (let firstIndex = 0; firstIndex < names.length; firstIndex += 1) {
+            for (let secondIndex = firstIndex + 1; secondIndex < names.length; secondIndex += 1) {
+              const first = names[firstIndex]
+              const second = names[secondIndex]
+              gamePairs.set(pairKey(first, second), [first, second])
+            }
+          }
+        }
+      }
+      for (const [first, second] of gamePairs.values()) addPair(first, second)
+      continue
+    }
+
     const lineup = game.playedLineup
     for (const pair of lineup?.pairs ?? []) {
       const firstName = lineup?.playerNames?.[String(pair.playerAId)]
@@ -371,13 +644,7 @@ function countPastPairs(games: ScheduledGame[]): Map<string, PairHistoryCount> {
       const secondName = lineup?.playerNames?.[String(pair.playerBId)]
         ?? game.players.find((player) => player.id === pair.playerBId)?.name
         ?? ''
-      if (!firstName.trim() || !secondName.trim()) continue
-      const names = firstName.toLowerCase() <= secondName.toLowerCase()
-        ? [firstName, secondName] as [string, string]
-        : [secondName, firstName] as [string, string]
-      const key = pairKey(firstName, secondName)
-      const stats = counts.get(key)
-      counts.set(key, { count: (stats?.count ?? 0) + 1, names: stats?.names ?? names })
+      addPair(firstName, secondName)
     }
   }
   return counts
@@ -400,13 +667,94 @@ function sameLineupDetails(left: LineupOption, right: LineupOption): boolean {
     && JSON.stringify(leftNames) === JSON.stringify(rightNames)
 }
 
+function playerNameSnapshot(players: Player[]): Record<string, string> {
+  return Object.fromEntries(players.map((player) => [String(player.id), player.name]))
+}
+
+function samePeriodLineups(
+  current: PeriodLineup[],
+  recorded: PeriodLineup[] | null,
+  players: Player[],
+  recordedPlayerNames: Record<string, string> | null,
+): boolean {
+  if (!recorded || !recordedPlayerNames) return false
+  const sortNames = (names: Record<string, string>) =>
+    Object.entries(names).sort(([first], [second]) => first.localeCompare(second))
+  return JSON.stringify(current) === JSON.stringify(recorded)
+    && JSON.stringify(sortNames(playerNameSnapshot(players))) === JSON.stringify(sortNames(recordedPlayerNames))
+}
+
+function hasFullIceShiftPositions(periods: PeriodLineup[]): boolean {
+  return periods.length === FULL_ICE_PERIOD_COUNT && periods.every((period) =>
+    period.defensePlayerIds.length >= DEFENSE_PAIR_SIZE
+    && period.forwardPlayerIds.length >= FORWARD_LINE_SIZE,
+  )
+}
+
+function hasCompletePeriodRotation(periods: PeriodLineup[], players: Player[]): boolean {
+  if (periods.length !== FULL_ICE_PERIOD_COUNT) return false
+  const rosterIds = players.filter((player) => player.name.trim()).map((player) => player.id)
+  if (rosterIds.length < 5 || !hasFullIceShiftPositions(periods)) return false
+  return periods.every((period) => {
+    const assigned = [...period.defensePlayerIds, ...period.forwardPlayerIds]
+    return assigned.length === rosterIds.length
+      && new Set(assigned).size === rosterIds.length
+      && rosterIds.every((playerId) => assigned.includes(playerId))
+  })
+}
+
+function periodPlayerNames(
+  playerIds: number[],
+  players: Player[],
+  nameSnapshot?: Record<string, string> | null,
+): string {
+  return playerIds.map((playerId) => {
+    const savedName = nameSnapshot?.[String(playerId)]?.trim()
+    const currentName = players.find((player) => player.id === playerId)?.name.trim()
+    return savedName || currentName || `Player ${playerId}`
+  }).join(' · ')
+}
+
+function periodLineupSummary(
+  period: PeriodLineup,
+  players: Player[],
+  nameSnapshot?: Record<string, string> | null,
+): string {
+  const forwardSummary = (playerIds: number[]) =>
+    splitIntoGroups(playerIds, FORWARD_LINE_SIZE)
+      .map((group, index) => `Line ${index + 1}: ${periodPlayerNames(group, players, nameSnapshot)}`)
+      .join(' · ')
+  const defenseSummary = splitIntoGroups(period.defensePlayerIds, DEFENSE_PAIR_SIZE)
+    .map((group, index) => `${group.length === DEFENSE_PAIR_SIZE ? 'Pair' : 'Group'} ${index + 1}: ${periodPlayerNames(group, players, nameSnapshot)}`)
+    .join(' · ')
+  return `Forwards · ${forwardSummary(period.forwardPlayerIds) || 'No players'} · Defense · ${defenseSummary || 'No players'}`
+}
+
 function needsGameRerecord(scheduledGame: ScheduledGame): boolean {
-  if (!scheduledGame.playedLineup && !scheduledGame.playedGoldenBobcatPlayerName) return false
+  const hasRecordedSnapshot = scheduledGame.playedMode !== null
+    || Boolean(scheduledGame.playedLineup)
+    || Boolean(scheduledGame.playedGoldenBobcatPlayerName)
+  if (!hasRecordedSnapshot) return false
+  const modeChanged = scheduledGame.playedMode !== null && scheduledGame.mode !== scheduledGame.playedMode
   const selectedLineup = scheduledGame.lineups.find((lineup) => lineup.id === scheduledGame.selectedLineupId)
-  const lineupChanged = scheduledGame.playedLineup
-    ? !selectedLineup || !sameLineupDetails(selectedLineup, scheduledGame.playedLineup)
-    : Boolean(selectedLineup)
-  return lineupChanged || scheduledGame.goldenBobcatPlayerName !== scheduledGame.playedGoldenBobcatPlayerName
+  const lineupChanged = scheduledGame.mode === '5v5'
+    ? scheduledGame.playedMode === '5v5'
+      ? !samePeriodLineups(
+        scheduledGame.periodLineups,
+        scheduledGame.playedPeriodLineups,
+        scheduledGame.players,
+        scheduledGame.playedPeriodPlayerNames,
+      )
+      : Boolean(selectedLineup)
+    : scheduledGame.playedLineup
+      ? !selectedLineup || !sameLineupDetails(selectedLineup, scheduledGame.playedLineup)
+      : Boolean(selectedLineup)
+  const goalieChanged = scheduledGame.playedMode !== null
+    && scheduledGame.goalieName !== (scheduledGame.playedGoalieName ?? '')
+  return modeChanged
+    || lineupChanged
+    || goalieChanged
+    || scheduledGame.goldenBobcatPlayerName !== scheduledGame.playedGoldenBobcatPlayerName
 }
 
 function createBalancedPairing(players: Player[], history: Map<string, number>): { pairs: Pair[]; flexPlayerIds: number[] } {
@@ -629,6 +977,8 @@ function App() {
     }
   })
   const [view, setView] = useState<'bench' | 'schedule' | 'analytics'>('bench')
+  const [currentPeriodIndex, setCurrentPeriodIndex] = useState(0)
+  const [currentFullIceShiftIndex, setCurrentFullIceShiftIndex] = useState(0)
   const [editingRoster, setEditingRoster] = useState(false)
   const [manualPairingOpen, setManualPairingOpen] = useState(false)
   const [manualPairingIds, setManualPairingIds] = useState<Record<number, number>>({})
@@ -662,8 +1012,23 @@ function App() {
       const players = game.players.map((player) => ({ ...player }))
       const rosterChanged = JSON.stringify(scheduledGame.players) !== JSON.stringify(players)
         || scheduledGame.goalieName !== game.goalieName
+      const rosterIds = (roster: Player[]) => roster
+        .filter((player) => player.name.trim())
+        .map((player) => player.id)
+        .sort((left, right) => left - right)
+      const rosterMembershipChanged = JSON.stringify(rosterIds(scheduledGame.players)) !== JSON.stringify(rosterIds(players))
+      const activeRosterIds = new Set(rosterIds(players))
+      const periodLineups = scheduledGame.mode === '5v5' && rosterMembershipChanged
+        ? generateBalancedPeriodLineups(players)
+        : scheduledGame.periodLineups.map((period) => ({
+          forwardPlayerIds: period.forwardPlayerIds.filter((playerId) => activeRosterIds.has(playerId)),
+          defensePlayerIds: period.defensePlayerIds.filter((playerId) => activeRosterIds.has(playerId)),
+        }))
+      const periodsChanged = JSON.stringify(scheduledGame.periodLineups) !== JSON.stringify(periodLineups)
       if (!scheduledGame.selectedLineupId && !game.pairs.length) {
-        return rosterChanged ? { ...scheduledGame, players, goalieName: game.goalieName } : scheduledGame
+        return rosterChanged || periodsChanged
+          ? { ...scheduledGame, players, goalieName: game.goalieName, periodLineups }
+          : scheduledGame
       }
       const selectedId = scheduledGame.selectedLineupId ?? createId('lineup')
       const currentLineup: LineupOption = {
@@ -679,6 +1044,7 @@ function App() {
         : [...scheduledGame.lineups, currentLineup]
       if (scheduledGame.selectedLineupId === selectedId
         && !rosterChanged
+        && !periodsChanged
         && JSON.stringify(scheduledGame.lineups) === JSON.stringify(lineups)) return scheduledGame
       return {
         ...scheduledGame,
@@ -686,6 +1052,7 @@ function App() {
         goalieName: game.goalieName,
         lineups,
         selectedLineupId: selectedId,
+        periodLineups,
       }
     }))
   }, [game, activeGameId])
@@ -747,8 +1114,24 @@ function App() {
   const assignments = getShiftAssignments(game, game.shift)
   const visibleScheduledGames = scheduledGames.filter((item) => !isPracticeTitle(item.title))
   const activeScheduledGame = visibleScheduledGames.find((item) => item.id === activeGameId) ?? null
+  const activeGameMode = activeScheduledGame?.mode ?? '4v4'
+  const isFullIce = activeGameMode === '5v5'
+  const currentPeriodLineup = activeScheduledGame?.periodLineups[currentPeriodIndex] ?? emptyPeriodLineup()
+  const currentFullIceShiftLineup = getFullIceShiftLineup(currentPeriodLineup, currentFullIceShiftIndex)
+  const nextFullIceShiftLineup = getFullIceShiftLineup(currentPeriodLineup, currentFullIceShiftIndex + 1)
+  const doubleShiftPlayerIds = getDoubleShiftPlayerIds(currentFullIceShiftLineup, nextFullIceShiftLineup)
+  const namedSkaters = game.players.filter((player) => player.name.trim())
+  const currentForwardGroups = splitIntoGroups(currentPeriodLineup.forwardPlayerIds, FORWARD_LINE_SIZE)
+  const currentDefenseGroups = splitIntoGroups(currentPeriodLineup.defensePlayerIds, DEFENSE_PAIR_SIZE)
+  const hasRecordedGame = Boolean(activeScheduledGame && (
+    activeScheduledGame.playedMode !== null
+    || activeScheduledGame.playedLineup
+  ))
   const activeNeedsRerecord = activeScheduledGame ? needsGameRerecord(activeScheduledGame) : false
-  const playedGames = scheduledGames.filter((item) => item.playedLineup && !isPracticeTitle(item.title))
+  const playedGames = scheduledGames.filter((item) =>
+    !isPracticeTitle(item.title)
+    && (item.playedMode === '5v5' ? Boolean(item.playedPeriodLineups) : Boolean(item.playedLineup)),
+  )
   const pairCounts = countPastPairs(scheduledGames)
   const knownSkaters = new Map<string, string>()
   const goalieCandidates = new Map<string, string>()
@@ -761,7 +1144,9 @@ function App() {
       for (const name of Object.values(lineup.playerNames ?? {})) addKnownName(knownSkaters, name)
       addKnownName(goalieCandidates, lineup.goalieName)
     }
+    for (const name of Object.values(scheduledGame.playedPeriodPlayerNames ?? {})) addKnownName(knownSkaters, name)
     addKnownName(goalieCandidates, scheduledGame.goalieName)
+    addKnownName(goalieCandidates, scheduledGame.playedGoalieName)
     addKnownName(goldenBobcatCandidates, scheduledGame.goldenBobcatPlayerName)
     addKnownName(goldenBobcatCandidates, scheduledGame.playedGoldenBobcatPlayerName)
   }
@@ -791,7 +1176,7 @@ function App() {
   const goalieStats = new Map<string, { name: string; count: number; dates: string[] }>()
   for (const [key, name] of goalieCandidates) goalieStats.set(key, { name, count: 0, dates: [] })
   for (const scheduledGame of playedGames) {
-    const goalie = scheduledGame.playedLineup?.goalieName.trim()
+    const goalie = (scheduledGame.playedGoalieName ?? scheduledGame.playedLineup?.goalieName)?.trim()
     if (!goalie) continue
     const key = goalie.toLowerCase()
     const stats = goalieStats.get(key) ?? { name: goalie, count: 0, dates: [] }
@@ -799,6 +1184,33 @@ function App() {
     stats.dates.push(scheduledGame.date)
     goalieStats.set(key, stats)
   }
+  const rotationBalance = new Map(game.players.map((player) => [
+    player.id,
+    { periods: 0, forwards: 0, defense: 0 },
+  ]))
+  for (const period of activeScheduledGame?.periodLineups ?? []) {
+    for (const playerId of period.forwardPlayerIds) {
+      const stats = rotationBalance.get(playerId)
+      if (stats) {
+        stats.periods += 1
+        stats.forwards += 1
+      }
+    }
+    for (const playerId of period.defensePlayerIds) {
+      const stats = rotationBalance.get(playerId)
+      if (stats) {
+        stats.periods += 1
+        stats.defense += 1
+      }
+    }
+  }
+  const fullIceRotationComplete = hasCompletePeriodRotation(
+    activeScheduledGame?.periodLineups ?? [],
+    game.players,
+  )
+  const fullIceShiftPositionsAvailable = hasFullIceShiftPositions(
+    activeScheduledGame?.periodLineups ?? [],
+  )
   const goldenBobcatStats = new Map<string, { name: string; games: { date: string; title: string }[] }>()
   for (const [key, name] of goldenBobcatCandidates) goldenBobcatStats.set(key, { name, games: [] })
   for (const scheduledGame of visibleScheduledGames) {
@@ -1043,6 +1455,8 @@ function App() {
 
   function openScheduledGame(scheduledGame: ScheduledGame) {
     setActiveGameId(scheduledGame.id)
+    setCurrentPeriodIndex(0)
+    setCurrentFullIceShiftIndex(0)
     setView('bench')
     setEditingRoster(false)
     setManualPairingOpen(false)
@@ -1086,9 +1500,17 @@ function App() {
       playedLineup: null,
       goldenBobcatPlayerName: null,
       playedGoldenBobcatPlayerName: null,
+      mode: '4v4' as const,
+      periodLineups: [],
+      playedMode: null,
+      playedPeriodLineups: null,
+      playedPeriodPlayerNames: null,
+      playedGoalieName: null,
     }
     setScheduledGames((currentGames) => [...currentGames, newGame].sort((a, b) => a.date.localeCompare(b.date)))
     setActiveGameId(newGame.id)
+    setCurrentPeriodIndex(0)
+    setCurrentFullIceShiftIndex(0)
     setGame((current) => ({
       ...current,
       players: roster.players.map((player) => ({ ...player })),
@@ -1098,6 +1520,52 @@ function App() {
       shift: 1,
     }))
     setView('bench')
+  }
+
+  function updateActiveGameMode(mode: GameMode) {
+    if (!activeGameId) return
+    setCurrentPeriodIndex(0)
+    setCurrentFullIceShiftIndex(0)
+    setEditingRoster(false)
+    setManualPairingOpen(false)
+    setScheduledGames((currentGames) => currentGames.map((scheduledGame) => {
+      if (scheduledGame.id !== activeGameId) return scheduledGame
+      return {
+        ...scheduledGame,
+        mode,
+        periodLineups: mode === '5v5' && !scheduledGame.periodLineups.length
+          ? generateBalancedPeriodLineups(game.players)
+          : scheduledGame.periodLineups,
+      }
+    }))
+  }
+
+  function rebalancePeriods() {
+    if (!activeGameId) return
+    setCurrentFullIceShiftIndex(0)
+    setScheduledGames((currentGames) => currentGames.map((scheduledGame) =>
+      scheduledGame.id === activeGameId
+        ? { ...scheduledGame, periodLineups: generateBalancedPeriodLineups(game.players) }
+        : scheduledGame,
+    ))
+  }
+
+  function updatePeriodPosition(playerId: number, position: 'forward' | 'defense') {
+    if (!activeGameId) return
+    setCurrentFullIceShiftIndex(0)
+    setScheduledGames((currentGames) => currentGames.map((scheduledGame) => {
+      if (scheduledGame.id !== activeGameId) return scheduledGame
+      const periods = Array.from({ length: FULL_ICE_PERIOD_COUNT }, (_, index) =>
+        scheduledGame.periodLineups[index] ?? emptyPeriodLineup(),
+      )
+      const period = periods[currentPeriodIndex]
+      const forwardPlayerIds = period.forwardPlayerIds.filter((id) => id !== playerId)
+      const defensePlayerIds = period.defensePlayerIds.filter((id) => id !== playerId)
+      if (position === 'forward') forwardPlayerIds.push(playerId)
+      else defensePlayerIds.push(playerId)
+      periods[currentPeriodIndex] = { forwardPlayerIds, defensePlayerIds }
+      return { ...scheduledGame, periodLineups: periods }
+    }))
   }
 
   function addManualGame(event: FormEvent<HTMLFormElement>) {
@@ -1138,6 +1606,12 @@ function App() {
       playedLineup: null,
       goldenBobcatPlayerName: null,
       playedGoldenBobcatPlayerName: null,
+      mode: '4v4' as const,
+      periodLineups: [],
+      playedMode: null,
+      playedPeriodLineups: null,
+      playedPeriodPlayerNames: null,
+      playedGoalieName: null,
     }))
     setScheduledGames((currentGames) =>
       [...currentGames, ...imported].sort((a, b) => a.date.localeCompare(b.date)),
@@ -1194,24 +1668,36 @@ function App() {
   function recordActiveGame() {
     if (!activeGameId) return
     const activeGame = scheduledGames.find((item) => item.id === activeGameId)
-    if (!activeGame || !game.pairs.length) return
-    const lineup: LineupOption = {
+    if (!activeGame) return
+    if (activeGame.mode === '5v5' && !hasCompletePeriodRotation(activeGame.periodLineups, game.players)) return
+    if (activeGame.mode === '4v4' && !game.pairs.length) return
+    const lineup = activeGame.mode === '4v4' ? {
       id: activeGame.selectedLineupId ?? createId('lineup'),
       pairs: game.pairs.map((pair) => ({ ...pair })),
       flexPlayerIds: [...game.flexPlayerIds],
       goalieName: game.goalieName,
-      playerNames: Object.fromEntries(game.players.map((player) => [String(player.id), player.name])),
-    }
+      playerNames: playerNameSnapshot(game.players),
+    } : null
     setScheduledGames((currentGames) => currentGames.map((item) => {
       if (item.id !== activeGameId) return item
-      const lineups = item.lineups.some((option) => option.id === lineup.id)
-        ? item.lineups.map((option) => option.id === lineup.id ? lineup : option)
-        : [...item.lineups, lineup]
+      const lineups = lineup
+        ? item.lineups.some((option) => option.id === lineup.id)
+          ? item.lineups.map((option) => option.id === lineup.id ? lineup : option)
+          : [...item.lineups, lineup]
+        : item.lineups
       return {
         ...item,
         lineups,
-        selectedLineupId: lineup.id,
+        selectedLineupId: lineup?.id ?? item.selectedLineupId,
         playedLineup: lineup,
+        playedMode: item.mode,
+        playedPeriodLineups: item.mode === '5v5'
+          ? clonePeriodLineups(item.periodLineups)
+          : null,
+        playedPeriodPlayerNames: item.mode === '5v5'
+          ? playerNameSnapshot(game.players)
+          : null,
+        playedGoalieName: game.goalieName,
         playedGoldenBobcatPlayerName: item.goldenBobcatPlayerName,
       }
     }))
@@ -1300,7 +1786,9 @@ function App() {
             <p className="team-name">BOBCATS</p>
           </div>
         </div>
-        <div className="game-tag"><span className="live-dot" /> HALF ICE <b>4v4</b></div>
+        <div className="game-tag">
+          <span className="live-dot" /> {isFullIce ? 'FULL ICE' : 'HALF ICE'} <b>{activeGameMode}</b>
+        </div>
       </header>
 
       <nav className="view-tabs" aria-label="Main navigation">
@@ -1321,11 +1809,15 @@ function App() {
         <section className="bench-panel" aria-labelledby="bench-title">
           <div className="section-kicker">
             <span>{activeScheduledGame?.title || 'BENCH BOARD'}</span>
-            <span className="shift-number">SHIFT {String(game.shift).padStart(2, '0')}</span>
+            <span className="shift-number">
+            {isFullIce
+              ? `PERIOD ${currentPeriodIndex + 1} · SHIFT ${String(currentFullIceShiftIndex + 1).padStart(2, '0')}`
+              : `SHIFT ${String(game.shift).padStart(2, '0')}`}
+            </span>
           </div>
           <div className="bench-heading">
             <div>
-              <p className="eyebrow">CALL THESE LINES</p>
+              <p className="eyebrow">{isFullIce ? 'ON ICE THIS SHIFT' : 'CALL THESE LINES'}</p>
               <h1 id="bench-title">Next shift<span>.</span></h1>
             </div>
             <button
@@ -1340,116 +1832,311 @@ function App() {
             </button>
           </div>
 
-          <div className="assignments" aria-live="polite">
-            <article className="assignment offense-assignment">
-              <div className="assignment-topline">
-                <span className="role-marker">01</span>
-                <span className="role-label">OFFENSE</span>
-                <span className="role-side">ATTACK</span>
+          {isFullIce && activeScheduledGame ? (
+            <>
+              <div className="full-ice-assignments" aria-live="polite">
+                <article className="assignment defense-assignment">
+                  <div className="assignment-topline">
+                    <span className="role-marker">D</span>
+                    <span className="role-label">DEFENSE</span>
+                    <span className="role-side">{currentFullIceShiftLineup.defensePlayerIds.length}/{DEFENSE_PAIR_SIZE} on</span>
+                  </div>
+                  <div className="full-ice-on-ice-list">
+                    {currentFullIceShiftLineup.defensePlayerIds.map((playerId) => (
+                      <div className="full-ice-on-ice-player" key={playerId}>
+                        <strong>{periodPlayerNames([playerId], game.players)}</strong>
+                        {doubleShiftPlayerIds.has(playerId) && (
+                          <span className="double-shift-badge">Double shift · stay out next</span>
+                        )}
+                      </div>
+                    ))}
+                    {!currentFullIceShiftLineup.defensePlayerIds.length && <span>No players assigned</span>}
+                  </div>
+                  <p className="pair-caption">On-ice defense pair</p>
+                </article>
+                <article className="assignment offense-assignment">
+                  <div className="assignment-topline">
+                    <span className="role-marker">F</span>
+                    <span className="role-label">FORWARDS</span>
+                    <span className="role-side">{currentFullIceShiftLineup.forwardPlayerIds.length}/{FORWARD_LINE_SIZE} on</span>
+                  </div>
+                  <div className="full-ice-on-ice-list">
+                    {currentFullIceShiftLineup.forwardPlayerIds.map((playerId) => (
+                      <div className="full-ice-on-ice-player" key={playerId}>
+                        <strong>{periodPlayerNames([playerId], game.players)}</strong>
+                        {doubleShiftPlayerIds.has(playerId) && (
+                          <span className="double-shift-badge">Double shift · stay out next</span>
+                        )}
+                      </div>
+                    ))}
+                    {!currentFullIceShiftLineup.forwardPlayerIds.length && <span>No players assigned</span>}
+                  </div>
+                  <p className="pair-caption">On-ice forward line</p>
+                </article>
               </div>
-              <p className="pair-title">{lineName(assignments?.offense ?? null, game.players)}</p>
-              <p className="pair-caption">Offense line</p>
-            </article>
-            <article className="assignment defense-assignment">
-              <div className="assignment-topline">
-                <span className="role-marker">02</span>
-                <span className="role-label">DEFENSE</span>
-                <span className="role-side">COVER</span>
+              <div className="shift-navigation">
+                <button
+                  className="previous-button"
+                  type="button"
+                  onClick={() => setCurrentFullIceShiftIndex((shift) => Math.max(0, shift - 1))}
+                  disabled={currentFullIceShiftIndex === 0 || !fullIceRotationComplete}
+                >← Previous shift</button>
+                <button
+                  className="next-button"
+                  type="button"
+                  onClick={() => setCurrentFullIceShiftIndex((shift) => shift + 1)}
+                  disabled={!fullIceRotationComplete}
+                >Next shift <span className="button-arrow" aria-hidden="true">→</span></button>
               </div>
-              <p className="pair-title">{lineName(assignments?.defense ?? null, game.players)}</p>
-              <p className="pair-caption">Defense line</p>
-            </article>
-          </div>
-
-          <div className="bench-actions">
-            <button
-              className="next-button"
-              type="button"
-              onClick={() => setGame((current) => ({ ...current, shift: current.shift + 1 }))}
-              disabled={!assignments}
-            >
-              <span>Next shift</span>
-              <span className="button-arrow" aria-hidden="true">→</span>
-            </button>
-            <button
-              className="previous-button"
-              type="button"
-              onClick={() => setGame((current) => ({ ...current, shift: Math.max(1, current.shift - 1) }))}
-              disabled={!assignments || game.shift === 1}
-            >
-              <span aria-hidden="true">←</span> Previous
-            </button>
-            <button className="reset-button" type="button" onClick={resetGame}>Reset game</button>
-          </div>
-          <p className="rotation-note">Lines rotate each shift <span>·</span> pairs stay together when possible</p>
+              <div className="period-navigation">
+                <button
+                  className="previous-button"
+                  type="button"
+                  onClick={() => {
+                    setCurrentPeriodIndex((period) => Math.max(0, period - 1))
+                    setCurrentFullIceShiftIndex(0)
+                  }}
+                  disabled={currentPeriodIndex === 0}
+                >← Previous period</button>
+                <button
+                  className="next-button"
+                  type="button"
+                  onClick={() => {
+                    setCurrentPeriodIndex((period) => Math.min(FULL_ICE_PERIOD_COUNT - 1, period + 1))
+                    setCurrentFullIceShiftIndex(0)
+                  }}
+                  disabled={currentPeriodIndex === FULL_ICE_PERIOD_COUNT - 1}
+                >Next period <span className="button-arrow" aria-hidden="true">→</span></button>
+              </div>
+              <p className="rotation-note">Next shift rotates the on-ice lines and shares any double shifts evenly. Next period resets the shift rotation.</p>
+            </>
+          ) : (
+            <>
+              <div className="assignments" aria-live="polite">
+                <article className="assignment offense-assignment">
+                  <div className="assignment-topline">
+                    <span className="role-marker">01</span>
+                    <span className="role-label">OFFENSE</span>
+                    <span className="role-side">ATTACK</span>
+                  </div>
+                  <p className="pair-title">{lineName(assignments?.offense ?? null, game.players)}</p>
+                  <p className="pair-caption">Offense line</p>
+                </article>
+                <article className="assignment defense-assignment">
+                  <div className="assignment-topline">
+                    <span className="role-marker">02</span>
+                    <span className="role-label">DEFENSE</span>
+                    <span className="role-side">COVER</span>
+                  </div>
+                  <p className="pair-title">{lineName(assignments?.defense ?? null, game.players)}</p>
+                  <p className="pair-caption">Defense line</p>
+                </article>
+              </div>
+              <div className="bench-actions">
+                <button
+                  className="next-button"
+                  type="button"
+                  onClick={() => setGame((current) => ({ ...current, shift: current.shift + 1 }))}
+                  disabled={!assignments}
+                >
+                  <span>Next shift</span>
+                  <span className="button-arrow" aria-hidden="true">→</span>
+                </button>
+                <button
+                  className="previous-button"
+                  type="button"
+                  onClick={() => setGame((current) => ({ ...current, shift: Math.max(1, current.shift - 1) }))}
+                  disabled={!assignments || game.shift === 1}
+                >
+                  <span aria-hidden="true">←</span> Previous
+                </button>
+                <button className="reset-button" type="button" onClick={resetGame}>Reset game</button>
+              </div>
+              <p className="rotation-note">Lines rotate each shift <span>·</span> pairs stay together when possible</p>
+            </>
+          )}
           {activeScheduledGame && (
             <div className="game-lineup-controls">
-              <p className="eyebrow">{formatGameDate(activeScheduledGame.date)} · THIS GAME'S LINEUPS</p>
-              <div className="lineup-option-list">
-                {activeScheduledGame.lineups.map((lineup, index) => {
-                  const isRecorded = activeScheduledGame.playedLineup?.id === lineup.id
-                  return (
-                    <div className="lineup-option-row" key={lineup.id}>
+              <p className="eyebrow">{formatGameDate(activeScheduledGame.date)} · {isFullIce ? 'FULL ICE ROTATION' : "THIS GAME'S LINEUPS"}</p>
+              <label className="game-mode-select" htmlFor="active-game-mode">
+                <span>Game format</span>
+                <select
+                  id="active-game-mode"
+                  value={activeScheduledGame.mode}
+                  onChange={(event) => updateActiveGameMode(event.target.value === '5v5' ? '5v5' : '4v4')}
+                >
+                  <option value="4v4">Half ice · 4v4</option>
+                  <option value="5v5">Full ice · 5v5</option>
+                </select>
+              </label>
+
+              {isFullIce ? (
+                <>
+                  <div className="period-tabs" aria-label="Choose period">
+                    {Array.from({ length: FULL_ICE_PERIOD_COUNT }, (_, index) => (
                       <button
-                        className={activeScheduledGame.selectedLineupId === lineup.id ? 'lineup-option is-selected' : 'lineup-option'}
+                        className={index === currentPeriodIndex ? 'period-tab is-active' : 'period-tab'}
                         type="button"
-                        onClick={() => chooseLineup(activeScheduledGame, lineup)}
-                      >
-                        <strong>
-                          Lineup {index + 1}
-                          {isRecorded && <span className="recorded-badge">RECORDED</span>}
-                        </strong>
-                        <span>{lineupPairSummary(lineup, game.players) || 'No pairs yet'}</span>
-                      </button>
-                      <button
-                        className="remove-lineup-button"
-                        type="button"
-                        onClick={() => removeLineupOption(activeScheduledGame, lineup)}
-                        disabled={isRecorded}
-                        aria-label={`Remove lineup ${index + 1}${isRecorded ? ' (recorded)' : ''}`}
-                        title={isRecorded ? 'The recorded lineup is kept for analytics' : `Remove lineup ${index + 1}`}
-                      >×</button>
-                    </div>
-                  )
-                })}
-              </div>
-              {(activeScheduledGame.playedLineup || activeScheduledGame.playedGoldenBobcatPlayerName) && (
+                        key={index}
+                        onClick={() => {
+                          setCurrentPeriodIndex(index)
+                          setCurrentFullIceShiftIndex(0)
+                        }}
+                        aria-pressed={index === currentPeriodIndex}
+                      >Period {index + 1}</button>
+                    ))}
+                  </div>
+                  <p className="roster-helper">Every named skater is assigned a position in every period. Auto-balance shares defense duty, favors three defense when it avoids an odd forward count, and rotates line groups.</p>
+                  <div className="period-slot-editor">
+                    <section className="period-position-group">
+                      <h3>Defense · {currentPeriodLineup.defensePlayerIds.length} players</h3>
+                      {currentDefenseGroups.map((group, groupIndex) => (
+                        <div className="period-line-group" key={`defense-group-${groupIndex}`}>
+                          <h4>{group.length === DEFENSE_PAIR_SIZE ? `Pair ${groupIndex + 1}` : `Group ${groupIndex + 1}`}</h4>
+                          {group.map((playerId) => {
+                            const player = namedSkaters.find((skater) => skater.id === playerId)
+                            if (!player) return null
+                            return (
+                              <label className="period-player-assignment" key={player.id}>
+                                <span>{player.name}</span>
+                                <select
+                                  value="defense"
+                                  onChange={(event) => updatePeriodPosition(
+                                    player.id,
+                                    event.target.value === 'defense' ? 'defense' : 'forward',
+                                  )}
+                                  aria-label={`Position for ${player.name}, period ${currentPeriodIndex + 1}`}
+                                >
+                                  <option value="forward">Forward</option>
+                                  <option value="defense">Defense</option>
+                                </select>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      ))}
+                    </section>
+                    <section className="period-position-group">
+                      <h3>Forwards · {currentPeriodLineup.forwardPlayerIds.length} players</h3>
+                      {currentForwardGroups.map((group, groupIndex) => (
+                        <div className="period-line-group" key={`forward-group-${groupIndex}`}>
+                          <h4>Line {groupIndex + 1}</h4>
+                          {group.map((playerId) => {
+                            const player = namedSkaters.find((skater) => skater.id === playerId)
+                            if (!player) return null
+                            return (
+                              <label className="period-player-assignment" key={player.id}>
+                                <span>{player.name}</span>
+                                <select
+                                  value="forward"
+                                  onChange={(event) => updatePeriodPosition(
+                                    player.id,
+                                    event.target.value === 'defense' ? 'defense' : 'forward',
+                                  )}
+                                  aria-label={`Position for ${player.name}, period ${currentPeriodIndex + 1}`}
+                                >
+                                  <option value="forward">Forward</option>
+                                  <option value="defense">Defense</option>
+                                </select>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      ))}
+                    </section>
+                  </div>
+                  {namedSkaters.length < 5 && (
+                    <p className="roster-helper">At least five named skaters are needed to record a 5v5 game.</p>
+                  )}
+                  {namedSkaters.length >= 5 && !fullIceShiftPositionsAvailable && (
+                    <p className="roster-helper">Each period needs at least three forwards and two defensemen to fill a 5v5 shift.</p>
+                  )}
+                  <div className="game-lineup-actions">
+                    <button className="secondary-button" type="button" onClick={rebalancePeriods} disabled={!namedSkaters.length}>
+                      Auto-balance rotation
+                    </button>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={recordActiveGame}
+                      disabled={!fullIceRotationComplete || (hasRecordedGame && !activeNeedsRerecord)}
+                    >
+                      {hasRecordedGame
+                        ? activeNeedsRerecord ? 'Re-record game' : 'Game recorded'
+                        : fullIceRotationComplete ? 'Record game' : fullIceShiftPositionsAvailable ? 'Complete all periods' : 'Need 3 F / 2 D'}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="lineup-option-list">
+                    {activeScheduledGame.lineups.map((lineup, index) => {
+                      const isRecorded = activeScheduledGame.playedMode !== '5v5'
+                        && activeScheduledGame.playedLineup?.id === lineup.id
+                      return (
+                        <div className="lineup-option-row" key={lineup.id}>
+                          <button
+                            className={activeScheduledGame.selectedLineupId === lineup.id ? 'lineup-option is-selected' : 'lineup-option'}
+                            type="button"
+                            onClick={() => chooseLineup(activeScheduledGame, lineup)}
+                          >
+                            <strong>
+                              Lineup {index + 1}
+                              {isRecorded && <span className="recorded-badge">RECORDED</span>}
+                            </strong>
+                            <span>{lineupPairSummary(lineup, game.players) || 'No pairs yet'}</span>
+                          </button>
+                          <button
+                            className="remove-lineup-button"
+                            type="button"
+                            onClick={() => removeLineupOption(activeScheduledGame, lineup)}
+                            disabled={isRecorded}
+                            aria-label={`Remove lineup ${index + 1}${isRecorded ? ' (recorded)' : ''}`}
+                            title={isRecorded ? 'The recorded lineup is kept for analytics' : `Remove lineup ${index + 1}`}
+                          >×</button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <div className="game-lineup-actions">
+                    <button className="secondary-button" type="button" onClick={shufflePairs} disabled={!canShuffle}>Shuffle another</button>
+                    <button className="secondary-button" type="button" onClick={suggestBalancedLineup} disabled={!canShuffle}>Suggest balanced</button>
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={recordActiveGame}
+                      disabled={!game.pairs.length || (hasRecordedGame && !activeNeedsRerecord)}
+                    >
+                      {hasRecordedGame
+                        ? activeNeedsRerecord ? 'Re-record game' : 'Game recorded'
+                        : game.pairs.length ? 'Record game' : 'Create a lineup first'}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {hasRecordedGame && (
                 <div className="recorded-lineup-summary" aria-label="Recorded game">
                   <strong>{activeNeedsRerecord ? 'RECORDED VERSION · CHANGES PENDING' : 'RECORDED FOR THIS GAME'}</strong>
-                  {activeScheduledGame.playedLineup && (
+                  {activeScheduledGame.playedMode === '5v5' && activeScheduledGame.playedPeriodLineups && (
                     <>
-                      <span>{lineupPairSummary(activeScheduledGame.playedLineup, game.players) || 'No pairs recorded'}</span>
-                      <span>Goalie: {activeScheduledGame.playedLineup.goalieName || 'Not set'}</span>
+                      {activeScheduledGame.playedPeriodLineups.map((period, index) => (
+                        <span key={index}>
+                          Period {index + 1}: {periodLineupSummary(period, game.players, activeScheduledGame.playedPeriodPlayerNames)}
+                        </span>
+                      ))}
+                      <span>Goalie: {activeScheduledGame.playedGoalieName || 'Not set'}</span>
                     </>
                   )}
-                  <span>
-                    {activeNeedsRerecord
-                      ? 'Re-record this game to update the lineup and Golden Bobcat analytics.'
-                      : 'The recorded lineup and Golden Bobcat recipient are included in analytics.'}
-                  </span>
-                  <span>
-                    Golden Bobcat: {activeScheduledGame.playedGoldenBobcatPlayerName || 'No recipient recorded'}
-                  </span>
+                  {activeScheduledGame.playedMode !== '5v5' && activeScheduledGame.playedLineup && (
+                    <>
+                      <span>{lineupPairSummary(activeScheduledGame.playedLineup, game.players) || 'No pairs recorded'}</span>
+                      <span>Goalie: {activeScheduledGame.playedGoalieName || activeScheduledGame.playedLineup.goalieName || 'Not set'}</span>
+                    </>
+                  )}
+                  <span>Golden Bobcat: {activeScheduledGame.playedGoldenBobcatPlayerName || 'No recipient recorded'}</span>
                 </div>
               )}
-              <div className="game-lineup-actions">
-                <button className="secondary-button" type="button" onClick={shufflePairs} disabled={!canShuffle}>Shuffle another</button>
-                <button className="secondary-button" type="button" onClick={suggestBalancedLineup} disabled={!canShuffle}>Suggest balanced</button>
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={recordActiveGame}
-                  disabled={
-                    !game.pairs.length
-                    || (Boolean(activeScheduledGame.playedLineup || activeScheduledGame.playedGoldenBobcatPlayerName)
-                      && !activeNeedsRerecord)
-                  }
-                >
-                  {activeScheduledGame.playedLineup || activeScheduledGame.playedGoldenBobcatPlayerName
-                    ? activeNeedsRerecord ? 'Re-record game' : 'Game recorded'
-                    : game.pairs.length ? 'Record game' : 'Create a lineup first'}
-                </button>
-              </div>
               <div className="golden-bobcat-control">
                 <label htmlFor="golden-bobcat-recipient">Golden Bobcat recipient</label>
                 <div>
@@ -1481,7 +2168,7 @@ function App() {
                     : 'Select a skater or goalie before recording the game.'}
                 </p>
               </div>
-              {(activeScheduledGame.playedLineup || activeScheduledGame.playedGoldenBobcatPlayerName) && (
+              {hasRecordedGame && (
                 <p className="roster-helper">
                   {activeNeedsRerecord
                     ? 'Changes are pending; re-record this game to update analytics.'
@@ -1495,24 +2182,27 @@ function App() {
         <aside className="roster-panel" aria-labelledby="roster-title">
           <div className="roster-heading">
             <div>
-              <p className="eyebrow">{game.players.length} SKATERS / 1 GOALIE</p>
-              <h2 id="roster-title">Lineup</h2>
+              <p className="eyebrow">{isFullIce ? namedSkaters.length : game.players.length} SKATERS / 1 GOALIE</p>
+              <h2 id="roster-title">{isFullIce ? 'Rotation balance' : 'Lineup'}</h2>
             </div>
             <div className="roster-heading-actions">
-              <button
-                className="copy-button"
-                type="button"
-                onClick={copyLineup}
-                disabled={game.players.length === 0}
-              >
-                {copyStatus === 'copied' ? 'Copied' : copyStatus === 'error' ? 'Copy failed' : 'Copy lineup'}
-              </button>
+              {!isFullIce && (
+                <button
+                  className="copy-button"
+                  type="button"
+                  onClick={copyLineup}
+                  disabled={game.players.length === 0}
+                >
+                  {copyStatus === 'copied' ? 'Copied' : copyStatus === 'error' ? 'Copy failed' : 'Copy lineup'}
+                </button>
+              )}
               <button
                 className="edit-button"
                 type="button"
                 onClick={() => {
                   setEditingRoster((editing) => !editing)
                   setManualPairingOpen(false)
+                  setCurrentFullIceShiftIndex(0)
                 }}
                 aria-expanded={editingRoster}
               >
@@ -1611,25 +2301,63 @@ function App() {
               </ol>
               <button className="add-skater-button" type="button" onClick={addSkater}>Add skater</button>
               <div className="roster-editor-actions">
-                <button className="shuffle-button" type="button" onClick={shufflePairs} disabled={!canShuffle}>
-                  Shuffle pairs
-                </button>
-                <button className="edit-button manual-pair-toggle" type="button" onClick={beginManualPairing}>
-                  Set pairs manually
-                </button>
-                <p className="roster-helper" aria-live="polite">
-                  {game.players.length < PLAYERS_PER_SHIFT
-                    ? `At least ${PLAYERS_PER_SHIFT} skaters are needed for 4v4.`
-                    : !allNamesEntered
-                      ? 'Enter every skater name and the goalie name.'
-                    : hasDuplicateNames
-                      ? 'Each skater and the goalie need unique names.'
-                      : `${game.players.length} skaters ready; ${game.players.length % 2 ? 'one extra rotates through the lines.' : 'all skaters will be paired.'}`}
-                </p>
+                {isFullIce ? (
+                  <p className="roster-helper" aria-live="polite">
+                    Full-ice rotations are regenerated from this roster. Set at least five skater names, then auto-balance or edit each period.
+                  </p>
+                ) : (
+                  <>
+                    <button className="shuffle-button" type="button" onClick={shufflePairs} disabled={!canShuffle}>
+                      Shuffle pairs
+                    </button>
+                    <button className="edit-button manual-pair-toggle" type="button" onClick={beginManualPairing}>
+                      Set pairs manually
+                    </button>
+                    <p className="roster-helper" aria-live="polite">
+                      {game.players.length < PLAYERS_PER_SHIFT
+                        ? `At least ${PLAYERS_PER_SHIFT} skaters are needed for 4v4.`
+                        : !allNamesEntered
+                          ? 'Enter every skater name and the goalie name.'
+                        : hasDuplicateNames
+                          ? 'Each skater and the goalie need unique names.'
+                          : `${game.players.length} skaters ready; ${game.players.length % 2 ? 'one extra rotates through the lines.' : 'all skaters will be paired.'}`}
+                    </p>
+                  </>
+                )}
               </div>
                 </>
               )}
             </div>
+          ) : isFullIce ? (
+            <>
+              <div className="goalie-banner">
+                <span className="goalie-badge">G</span>
+                <span className="goalie-name">
+                  <strong>{game.goalieName || 'Goalie not set'}</strong>
+                  <small>GOALIE · FULL GAME</small>
+                </span>
+              </div>
+              <ol className="roster-list">
+                {namedSkaters.map((player) => {
+                  const role = currentPeriodLineup.defensePlayerIds.includes(player.id)
+                    ? 'DEFENSE'
+                    : currentPeriodLineup.forwardPlayerIds.includes(player.id) ? 'FORWARD' : 'REST'
+                  const roleClass = role === 'FORWARD' ? 'offense' : role.toLowerCase()
+                  const balance = rotationBalance.get(player.id) ?? { periods: 0, forwards: 0, defense: 0 }
+                  return (
+                    <li className="roster-row" key={player.id}>
+                      <span className="roster-index">{String(player.id).padStart(2, '0')}</span>
+                      <span className="roster-name">
+                        <strong>{player.name || `Player ${player.id}`}</strong>
+                        <small>{balance.periods} periods · {balance.forwards} F / {balance.defense} D</small>
+                      </span>
+                      <span className={`roster-status ${roleClass}`}>{role}</span>
+                    </li>
+                  )
+                })}
+              </ol>
+              <p className="roster-helper">This period’s position is shown at right. Total periods and F/D assignments show balance across all three periods.</p>
+            </>
           ) : (
             <>
               <div className="goalie-banner">
@@ -1674,7 +2402,7 @@ function App() {
           )}
 
           <div className="roster-footer">
-            <span className="ice-key"><i className="key-offense" /> Offense</span>
+            <span className="ice-key"><i className="key-offense" /> {isFullIce ? 'Forward' : 'Offense'}</span>
             <span className="ice-key"><i className="key-defense" /> Defense</span>
             <span className="ice-key"><i className="key-rest" /> Rest</span>
           </div>
@@ -1737,9 +2465,11 @@ function App() {
                     <div className="schedule-description">
                       <strong>{scheduledGame.title}</strong>
                       <span>
-                        {scheduledGame.playedLineup
-                          ? `Played · Lineup ${Math.max(1, scheduledGame.lineups.findIndex((lineup) => lineup.id === scheduledGame.playedLineup?.id) + 1)} recorded${needsGameRerecord(scheduledGame) ? ' · update needed' : ''}`
-                          : `${scheduledGame.lineups.length} saved lineup${scheduledGame.lineups.length === 1 ? '' : 's'}`}
+                        {scheduledGame.playedMode === '5v5'
+                          ? `Played · 5v5 rotation recorded${needsGameRerecord(scheduledGame) ? ' · update needed' : ''}`
+                          : scheduledGame.playedLineup
+                            ? `Played · Lineup ${Math.max(1, scheduledGame.lineups.findIndex((lineup) => lineup.id === scheduledGame.playedLineup?.id) + 1)} recorded${needsGameRerecord(scheduledGame) ? ' · update needed' : ''}`
+                            : `${scheduledGame.mode} · ${scheduledGame.lineups.length} saved lineup${scheduledGame.lineups.length === 1 ? '' : 's'}`}
                       </span>
                     </div>
                     <button className="edit-button" type="button" onClick={() => openScheduledGame(scheduledGame)}>Open lineup</button>
